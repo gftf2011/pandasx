@@ -10,7 +10,7 @@ import { merge, type MergeOptions } from './reshape.ts';
 import { toCsv, type ToCsvOptions } from './io/csv.ts';
 import { toJson, type JsonOrient } from './io/json.ts';
 import {
-  duplicatedFlags, isMask, isPlainObject, KeyError, labelPositions, positionalPositions, samplePositions,
+  duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, labelPositions, positionalPositions, samplePositions,
   Series, toIndex, type Mask, type Operand, type RowSelector,
 } from './series.ts';
 
@@ -46,7 +46,8 @@ const isAxis1 = (axis: unknown) => axis === 1 || axis === 'columns';
 export class DataFrame {
   /** @internal */
   readonly _cols: Map<string, Column>;
-  readonly index: Index;
+  /** Row labels; may be reassigned (same length), like `df.index = [...]`. */
+  index: Index;
 
   constructor(data: FrameInput = {}, options: FrameOptions = {}) {
     const cols = new Map<string, Column>();
@@ -104,6 +105,20 @@ export class DataFrame {
 
   get columns(): string[] {
     return [...this._cols.keys()];
+  }
+
+  /** Renames all columns at once, like `df.columns = [...]`. */
+  set columns(names: string[]) {
+    if (names.length !== this._cols.size) throw new RangeError(`Expected ${this._cols.size} column names, got ${names.length}`);
+    const cols = [...this._cols.values()];
+    this._cols.clear();
+    names.forEach((n, j) => this._cols.set(n, cols[j]));
+  }
+
+  /** Replaces the index in place, like `df.index = labels`. */
+  setAxis(labels: readonly Label[] | Index): this {
+    this.index = toIndex(labels instanceof Index ? labels : [...labels], this.length);
+    return this;
   }
 
   get shape(): [number, number] {
@@ -246,14 +261,7 @@ export class DataFrame {
   }
 
   private select(pos: number[] | null, rowScalar: boolean, cols: ColSelector | null, positional: boolean): unknown {
-    let names: string[];
-    if (cols === null) names = this.columns;
-    else if (typeof cols === 'string') names = [cols];
-    else if (cols instanceof Slice) {
-      const idx = new Index(this.columns);
-      names = (positional ? cols.positions(idx.length) : cols.labelPositions(idx)).map((p) => this.columns[p]);
-    } else if (cols.length > 0 && typeof cols[0] === 'boolean') names = this.columns.filter((_, j) => (cols as boolean[])[j]);
-    else names = [...(cols as readonly string[])];
+    const names = this.columnNames(cols, positional);
     const colScalar = typeof cols === 'string';
 
     if (rowScalar) {
@@ -276,6 +284,99 @@ export class DataFrame {
 
   iat(row: number, column: number): unknown {
     return this.iloc(row, column);
+  }
+
+  // --------------------------------------------------------------- assignment
+
+  /**
+   * In-place assignment by labels, like `df.loc[rows, cols] = value`. `null`
+   * selects everything on that axis. A new scalar row label appends a row and a
+   * new column name adds a column. `value` may be a scalar, an array (one value
+   * per selected row, per selected column when a single row is selected, or a
+   * 2-D rows × columns array), a Series (aligned by row labels, or by column
+   * labels for a single row) or a DataFrame (aligned on both axes).
+   */
+  setLoc(rows: RowSelector | null | ((df: DataFrame) => Mask), cols: ColSelector | null, value: unknown): this {
+    const r = typeof rows === 'function' ? rows(this) : rows;
+    const rowScalar = r !== null && isScalarKey(r, this.index);
+    if (rowScalar && !this.index.has(r as Label)) {
+      const n = this.length;
+      const grow = Int32Array.from({ length: n + 1 }, (_, i) => (i < n ? i : -1));
+      for (const [k, c] of this._cols) this._cols.set(k, c.take(grow));
+      this.index = new Index([...this.index.labels, r as Label], { name: this.index.name, names: this.index.names });
+    }
+    const pos = r === null ? Array.from({ length: this.length }, (_, i) => i) : labelPositions(r as RowSelector, this.index);
+    const names = this.columnNames(cols, false, true);
+    return this.assignBlock(pos, names, value, rowScalar, typeof cols === 'string');
+  }
+
+  /** In-place assignment by positions, like `df.iloc[rows, cols] = value`. */
+  setIloc(rows: number | readonly number[] | Mask | Slice | null, cols: number | readonly number[] | Slice | null, value: unknown): this {
+    const pos = rows === null ? Array.from({ length: this.length }, (_, i) => i) : positionalPositions(rows, this.length);
+    const all = this.columns;
+    const names = cols === null ? all : positionalPositions(cols, all.length).map((p) => all[p]);
+    return this.assignBlock(pos, names, value, typeof rows === 'number', typeof cols === 'number');
+  }
+
+  setAt(row: Label, column: string, value: unknown): this {
+    return this.setLoc(row as RowSelector, column, value);
+  }
+
+  setIat(row: number, column: number, value: unknown): this {
+    return this.setIloc(row, column, value);
+  }
+
+  /** Column names selected by a column key; unknown names are allowed when `allowNew`. */
+  private columnNames(cols: ColSelector | null, positional: boolean, allowNew = false): string[] {
+    if (cols === null) return this.columns;
+    if (typeof cols === 'string') {
+      if (!allowNew) this._column(cols);
+      return [cols];
+    }
+    if (cols instanceof Slice) {
+      const idx = new Index(this.columns);
+      return (positional ? cols.positions(idx.length) : cols.labelPositions(idx)).map((p) => this.columns[p]);
+    }
+    if (cols.length > 0 && typeof cols[0] === 'boolean') return this.columns.filter((_, j) => (cols as readonly boolean[])[j]);
+    if (!allowNew) for (const c of cols as readonly string[]) this._column(c);
+    return [...(cols as readonly string[])];
+  }
+
+  private assignBlock(pos: readonly number[], names: readonly string[], value: unknown, rowScalar: boolean, colScalar: boolean): this {
+    const labels = this.index.labels;
+    let at: (k: number, j: number) => unknown;
+    if (value instanceof DataFrame) {
+      at = (k, j) => {
+        if (!value.has(names[j])) return null;
+        const p = value.index.getLoc(labels[pos[k]]);
+        return p.length ? value._column(names[j]).get(p[0]) : null;
+      };
+    } else if (value instanceof Series) {
+      at = rowScalar && !colScalar ? (_, j) => value.get(names[j], null) : (k) => value.get(labels[pos[k]], null);
+    } else if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+      const arr = value as ArrayLike<unknown>;
+      if (arr.length > 0 && Array.isArray(arr[0])) {
+        if (arr.length !== pos.length) throw new RangeError(`Expected ${pos.length} rows of values, got ${arr.length}`);
+        at = (k, j) => (arr[k] as unknown[])[j];
+      } else if (rowScalar && !colScalar) {
+        if (arr.length !== names.length) throw new RangeError(`Expected ${names.length} values (one per column), got ${arr.length}`);
+        at = (_, j) => arr[j];
+      } else {
+        if (arr.length !== pos.length) throw new RangeError(`Expected ${pos.length} values (one per row), got ${arr.length}`);
+        at = (k) => arr[k];
+      }
+    } else at = () => value;
+
+    names.forEach((name, j) => {
+      const col = this._cols.get(name);
+      if (col) this._cols.set(name, col.setAt(pos, (k) => at(k, j)));
+      else {
+        const arr = new Array(this.length).fill(null);
+        pos.forEach((p, k) => (arr[p] = at(k, j)));
+        this._cols.set(name, Column.from(arr));
+      }
+    });
+    return this;
   }
 
   /** @internal Rows at positions. */
@@ -432,6 +533,9 @@ export class DataFrame {
   min(options?: AxisAggOptions): Series { return this.reduce('min', options); }
   max(options?: AxisAggOptions): Series { return this.reduce('max', options); }
   count(options?: AxisAggOptions): Series { return this.reduce('count', options); }
+  sem(options?: AxisAggOptions): Series { return this.reduce('sem', options); }
+  any(options?: AxisAggOptions): Series { return this.reduce('any', options); }
+  all(options?: AxisAggOptions): Series { return this.reduce('all', options); }
   nunique(options?: AxisAggOptions): Series { return this.reduce('nunique', options); }
 
   quantile(q = 0.5): Series {
@@ -572,14 +676,21 @@ export class DataFrame {
     return this.map(fn);
   }
 
-  astype(dtype: DType | Record<string, DType>): DataFrame {
+  /** Casts all columns, or per column with `{column: dtype}`. */
+  astype(dtype: DType | Record<string, DType>, options: { categories?: readonly unknown[]; ordered?: boolean; freq?: string } = {}): DataFrame {
     const cols = new Map<string, Column>();
     for (const [k, c] of this._cols) {
       const d = typeof dtype === 'string' ? dtype : dtype[k];
-      cols.set(k, d ? c.astype(d) : c);
+      cols.set(k, d ? Series._from(c, this.index, k).astype(d, options)._col : c);
     }
     return this.with(cols);
   }
+
+  /** Converts every column to the best nullable dtype (pandas `convert_dtypes`). */
+  convertDtypes(): DataFrame {
+    return this.mapColumns((s) => s.convertDtypes());
+  }
+
 
   replace(from: unknown, to?: unknown): DataFrame {
     return this.mapColumns((s) => s.replace(from, to));

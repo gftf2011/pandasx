@@ -1,7 +1,7 @@
 import { aggregate, NUMERIC_AGGS } from './core/aggregate.ts';
 import { Column } from './core/column.ts';
 import { Index } from './core/indexes.ts';
-import { isNumericDType, type AggName, type DType, type Label } from './core/types.ts';
+import { isNumericDType, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
 import { compareValues, hashKey, isNA } from './core/values.ts';
 import { DataFrame } from './frame.ts';
 import { concat } from './reshape.ts';
@@ -56,12 +56,21 @@ function computeGroups(keyCols: readonly Column[], n: number, sort: boolean, dro
   return { keys: order.map((g) => keys[g]), rows: order.map((g) => rows[g]) };
 }
 
-/** Output dtype of an aggregation of a column with `dtype`. */
+/** Output dtype of an aggregation of a column with `dtype` (undefined = infer). */
 function resultDType(agg: AggName, dtype: DType, values: readonly unknown[]): DType | undefined {
-  if (agg === 'count' || agg === 'size' || agg === 'nunique') return 'int64';
-  if (agg === 'mean' || agg === 'median' || agg === 'std' || agg === 'var') return 'float64';
-  if (agg === 'sum' || agg === 'prod') return dtype === 'float64' ? 'float64' : isNumericDType(dtype) ? 'int64' : undefined;
-  return values.some(isNA) ? undefined : dtype;
+  const nullable = NULLABLE_DTYPES.has(dtype);
+  switch (agg) {
+    case 'count': case 'size': case 'nunique': return 'int64';
+    case 'any': case 'all': return 'bool';
+    case 'mean': case 'median': case 'std': case 'var': case 'sem':
+      return dtype === 'timedelta' || dtype === 'datetime' ? undefined : nullable ? 'Float64' : 'float64';
+    case 'sum': case 'prod':
+      if (dtype === 'float64' || dtype === 'Float64' || dtype === 'bigint') return dtype;
+      if (dtype === 'Int64' || dtype === 'boolean') return 'Int64';
+      return isNumericDType(dtype) ? 'int64' : undefined;
+    default:
+      return nullable || dtype === 'category' || dtype === 'period' || !values.some(isNA) ? dtype : undefined;
+  }
 }
 
 abstract class BaseGroupBy {
@@ -132,7 +141,8 @@ abstract class BaseGroupBy {
       return Column.from(rows.map((r) => agg(Series._from(col.take(r), this._frame.index.take(r), name))));
     }
     const vals = rows.map((r) => aggregate(col, agg, r));
-    return Column.from(vals, resultDType(agg, col.dtype, vals));
+    const dtype = resultDType(agg, col.dtype, vals);
+    return Column.from(vals, dtype, dtype === col.dtype ? col.meta : {});
   }
 }
 

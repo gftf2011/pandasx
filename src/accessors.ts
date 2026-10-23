@@ -1,6 +1,6 @@
 import { Column } from './core/column.ts';
 import type { DType } from './core/types.ts';
-import { isNA } from './core/values.ts';
+import { hashKey, isNA } from './core/values.ts';
 import { Series } from './series.ts';
 
 /** Vectorised string functions (`series.str`). Missing values stay missing. */
@@ -160,4 +160,74 @@ export class DatetimeMethods {
       });
     }, 'string'), this.s.index, this.s.name);
   }
+}
+
+/** Categorical helpers (`series.cat`), like pandas' `.cat` accessor. */
+export class CategoricalMethods {
+  private readonly s: Series;
+
+  constructor(s: Series) {
+    if (s.dtype !== 'category') throw new TypeError(`.cat accessor requires category dtype, got ${s.dtype}`);
+    this.s = s;
+  }
+
+  get categories(): unknown[] { return [...this.s._col.meta.categories!]; }
+  get ordered(): boolean { return this.s._col.meta.ordered ?? false; }
+
+  /** Integer codes (-1 for missing). */
+  get codes(): Series {
+    return Series._from(new Column('int64', Float64Array.from(this.s._col.data as Int32Array)), this.s.index, this.s.name);
+  }
+
+  private with(categories: readonly unknown[], ordered = this.ordered, remapByValue = true): Series {
+    const col = this.s._col;
+    if (!remapByValue) return Series._from(new Column('category', col.data, { categories, ordered }), this.s.index, this.s.name);
+    return Series._from(Column.from(col.toArray(), 'category', { categories, ordered }), this.s.index, this.s.name);
+  }
+
+  /** New names for the categories, by position (array), mapping, or function. */
+  renameCategories(names: readonly unknown[] | Record<string, unknown> | ((c: unknown) => unknown)): Series {
+    const cats = this.categories;
+    let next: unknown[];
+    if (typeof names === 'function') next = cats.map(names);
+    else if (Array.isArray(names)) {
+      if (names.length !== cats.length) throw new RangeError('new categories must have the same length as the old ones');
+      next = [...names];
+    } else next = cats.map((c) => (Object.hasOwn(names, String(c)) ? (names as Record<string, unknown>)[String(c)] : c));
+    if (new Set(next.map((c) => hashKey(c))).size !== next.length) throw new Error('Categorical categories must be unique');
+    return this.with(next, this.ordered, false);
+  }
+
+  reorderCategories(categories: readonly unknown[], options: { ordered?: boolean } = {}): Series {
+    const have = new Set(this.categories.map((c) => hashKey(c)));
+    if (categories.length !== have.size || !categories.every((c) => have.has(hashKey(c)))) {
+      throw new Error('items in new categories are not the same as in old categories');
+    }
+    return this.with(categories, options.ordered ?? this.ordered);
+  }
+
+  addCategories(categories: readonly unknown[]): Series {
+    const have = new Set(this.categories.map((c) => hashKey(c)));
+    for (const c of categories) if (have.has(hashKey(c))) throw new Error(`new categories must not include old categories: ${String(c)}`);
+    return this.with([...this.categories, ...categories], this.ordered, false);
+  }
+
+  /** Removes categories; values in them become NA. */
+  removeCategories(categories: readonly unknown[]): Series {
+    const drop = new Set(categories.map((c) => hashKey(c)));
+    return this.with(this.categories.filter((c) => !drop.has(hashKey(c))));
+  }
+
+  removeUnusedCategories(): Series {
+    const used = new Set(Array.from(this.s._col.data as Int32Array).filter((c) => c >= 0));
+    return this.with(this.categories.filter((_, i) => used.has(i)));
+  }
+
+  /** Replaces the categories; values not in the new set become NA. */
+  setCategories(categories: readonly unknown[], options: { ordered?: boolean } = {}): Series {
+    return this.with(categories, options.ordered ?? this.ordered);
+  }
+
+  asOrdered(): Series { return this.with(this.categories, true, false); }
+  asUnordered(): Series { return this.with(this.categories, false, false); }
 }

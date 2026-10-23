@@ -1,6 +1,7 @@
 import type { Column } from './column.ts';
 import type { Index } from './indexes.ts';
-import type { Label } from './types.ts';
+import { Period, Timedelta } from './time.ts';
+import { NULLABLE_DTYPES, type Label } from './types.ts';
 
 export const DISPLAY = {
   maxRows: 60,
@@ -29,7 +30,8 @@ export function formatScalar(v: unknown): string {
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? 'NaT' : v.toISOString();
   if (typeof v === 'string') return v;
   if (Array.isArray(v)) return '(' + v.map(formatScalar).join(', ') + ')';
-  if (typeof v === 'object') return JSON.stringify(v);
+  if (v instanceof Timedelta || v instanceof Period) return v.toString();
+  if (typeof v === 'object') return JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? x.toString() : x));
   return String(v);
 }
 
@@ -38,7 +40,8 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
   const rows = positions.filter((p): p is number => p !== null);
   let fmt: (p: number) => string;
 
-  if (col.dtype === 'float64') {
+  const na = NULLABLE_DTYPES.has(col.dtype) ? '<NA>' : 'NaN';
+  if (col.dtype === 'float64' || col.dtype === 'Float64') {
     const data = col.data as Float64Array;
     let decimals = 1;
     let exp = false;
@@ -53,7 +56,7 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
     }
     fmt = (p) => {
       const v = data[p];
-      if (Number.isNaN(v)) return 'NaN';
+      if (Number.isNaN(v)) return na;
       if (!Number.isFinite(v)) return v > 0 ? 'inf' : '-inf';
       return exp ? v.toExponential(DISPLAY.precision) : v.toFixed(decimals);
     };
@@ -61,6 +64,12 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
     const data = col.data as Float64Array;
     const dateOnly = rows.every((p) => Number.isNaN(data[p]) || data[p] % 86_400_000 === 0);
     fmt = (p) => (Number.isNaN(data[p]) ? 'NaT' : formatDate(data[p], dateOnly));
+  } else if (col.dtype === 'Int64' || col.dtype === 'boolean') {
+    fmt = (p) => (col.isNA(p) ? na : formatScalar(col.get(p)));
+  } else if (col.dtype === 'timedelta' || col.dtype === 'period') {
+    fmt = (p) => (col.isNA(p) ? 'NaT' : formatScalar(col.get(p)));
+  } else if (col.dtype === 'category') {
+    fmt = (p) => (col.isNA(p) ? 'NaN' : formatScalar(col.get(p)));
   } else {
     fmt = (p) => formatScalar(col.get(p));
   }

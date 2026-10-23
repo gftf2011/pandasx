@@ -3,9 +3,10 @@ import { Column } from './core/column.ts';
 import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
-import { isFloatStorage, isNumericDType, type AggName, type DType, type Label } from './core/types.ts';
+import { isNumericDType, isNumericStorage, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
+import { normalizeFreq, parseDate, parsePeriodString, parseTimedelta, Period, periodOrdinal, Timedelta } from './core/time.ts';
 import { compareValues, hashKey, isNA, valuesEqual } from './core/values.ts';
-import { DatetimeMethods, StringMethods } from './accessors.ts';
+import { CategoricalMethods, DatetimeMethods, StringMethods } from './accessors.ts';
 import { DataFrame } from './frame.ts';
 import { SeriesGroupBy, type GroupByOptions } from './groupby.ts';
 
@@ -28,7 +29,7 @@ export interface SeriesOptions {
 export type Mask = Series | readonly boolean[] | Uint8Array;
 
 /** Operand of arithmetic and comparison methods. */
-export type Operand = Series | readonly unknown[] | Float64Array | number | string | boolean | Date | null;
+export type Operand = Series | readonly unknown[] | Float64Array | number | bigint | string | boolean | Date | Timedelta | Period | null;
 
 export type RowSelector = Label | readonly Label[] | Mask | Slice;
 
@@ -123,9 +124,10 @@ const CMP: Record<string, (c: number) => boolean> = {
 /** One-dimensional labeled array, the equivalent of `pandas.Series`. */
 export class Series {
   /** @internal */
-  readonly _col: Column;
-  readonly index: Index;
-  readonly name: string | null;
+  /** @internal Replaced (never mutated) by the `set*` methods. */
+  _col: Column;
+  index: Index;
+  name: string | null;
 
   constructor(data: SeriesInput = [], options: SeriesOptions = {}) {
     let col: Column;
@@ -318,6 +320,8 @@ export class Series {
   var(opts?: AggOptions): number { return this.agg1('var', opts) as number; }
   min(opts?: AggOptions): unknown { return this.agg1('min', opts); }
   max(opts?: AggOptions): unknown { return this.agg1('max', opts); }
+  /** Standard error of the mean. */
+  sem(opts?: AggOptions): number { return this.agg1('sem', opts) as number; }
   /** Number of non-missing values. */
   count(): number { return this.agg1('count') as number; }
   nunique(): number { return this.agg1('nunique') as number; }
@@ -363,7 +367,7 @@ export class Series {
   /** Summary statistics (numeric: count/mean/std/min/quartiles/max; otherwise count/unique/top/freq). */
   describe(): Series {
     if (isNumericDType(this.dtype)) {
-      const c = this._col.dtype === 'bool' ? this._col.astype('float64') : this._col;
+      const c = this._col.dtype === 'bool' || this._col.dtype === 'boolean' || this._col.dtype === 'bigint' ? Column.from(numericView(this._col), 'float64') : this._col;
       return new Series(
         [aggregate(c, 'count'), aggregate(c, 'mean'), aggregate(c, 'std'), aggregate(c, 'min'),
           quantile(c, 0.25), quantile(c, 0.5), quantile(c, 0.75), aggregate(c, 'max')],
@@ -391,6 +395,9 @@ export class Series {
       if (e) e.n++;
       else counts.set(k, { value: missing ? null : v, n: 1 });
       total++;
+    }
+    if (this.dtype === 'category') {
+      for (const c of this._col.meta.categories!) if (!counts.has(hashKey(c))) counts.set(hashKey(c), { value: c, n: 0 });
     }
     let entries = [...counts.values()];
     if (sort) {
@@ -426,8 +433,7 @@ export class Series {
   // --------------------------------------------------------------- cumulative
 
   private cumulative(step: (acc: number, v: number) => number, init: number): Series {
-    if (!isNumericDType(this.dtype)) throw new TypeError(`Cannot compute cumulative op on dtype ${this.dtype}`);
-    const src = this._col.data as ArrayLike<number>;
+    const src = numericView(this._col, 'cumulative op');
     const out = new Float64Array(this.length);
     let acc = init;
     for (let i = 0; i < out.length; i++) {
@@ -435,7 +441,7 @@ export class Series {
       acc = step(acc, src[i]);
       out[i] = acc;
     }
-    return this.with(new Column(this.dtype === 'float64' ? 'float64' : 'int64', out));
+    return this.with(new Column(numericResultDType(this.dtype, true), out));
   }
 
   cumsum(): Series { return this.cumulative((a, v) => a + v, 0); }
@@ -452,7 +458,7 @@ export class Series {
       pos[i] = j >= 0 && j < n ? j : -1;
     }
     let col = this._col.take(pos);
-    if (!isNA(fillValue)) col = col.map((v, i) => (pos[i] < 0 ? fillValue : v), this.dtype);
+    if (!isNA(fillValue)) col = col.mapLike((v, i) => (pos[i] < 0 ? fillValue : v));
     return this.with(col);
   }
 
@@ -468,11 +474,10 @@ export class Series {
   // ---------------------------------------------------------------- transform
 
   private numericMap(fn: (v: number) => number, keepInt = false): Series {
-    if (!isNumericDType(this.dtype)) throw new TypeError(`Operation requires numeric dtype, got ${this.dtype}`);
-    const src = this._col.data as ArrayLike<number>;
+    const src = numericView(this._col, 'this operation');
     const out = new Float64Array(this.length);
     for (let i = 0; i < out.length; i++) out[i] = fn(src[i]);
-    return this.with(new Column(keepInt && this.dtype === 'int64' ? 'int64' : 'float64', out));
+    return this.with(new Column(numericResultDType(this.dtype, keepInt), out));
   }
 
   abs(): Series { return this.numericMap(Math.abs, true); }
@@ -506,8 +511,20 @@ export class Series {
     return this.map(fn);
   }
 
-  astype(dtype: DType): Series {
-    return this.with(this._col.astype(dtype));
+  /** Casts to `dtype`; `category` accepts `{categories, ordered}`, `period` accepts `{freq}`. */
+  astype(dtype: DType, options: { categories?: readonly unknown[]; ordered?: boolean; freq?: string } = {}): Series {
+    const meta = { categories: options.categories, ordered: options.ordered, freq: options.freq ? normalizeFreq(options.freq) : undefined };
+    return this.with(this._col.astype(dtype, meta));
+  }
+
+  /** Converts to the best nullable dtypes: Int64, Float64, boolean, string (pandas `convert_dtypes`). */
+  convertDtypes(): Series {
+    return this.with(convertColumn(this._col));
+  }
+
+  /** Categorical helpers (`series.cat`). */
+  get cat(): CategoricalMethods {
+    return new CategoricalMethods(this);
   }
 
   /** Replaces values equal to `from` (or every key of a mapping) with `to`. */
@@ -516,7 +533,7 @@ export class Series {
     if (from instanceof Map) for (const [k, v] of from) m.set(hashKey(k), v);
     else if (isPlainObject(from)) for (const [k, v] of Object.entries(from)) m.set(k, v);
     else m.set(hashKey(from), to);
-    return this.with(this._col.map((v) => {
+    return this.with(this._col.mapLike((v) => {
       const k = hashKey(v);
       return m.has(k) ? m.get(k) : v;
     }));
@@ -537,7 +554,7 @@ export class Series {
     const hit = new Uint8Array(this.length);
     for (const p of maskPositions(c, this.index)) hit[p] = 1;
     const aligned = other instanceof Series ? other.reindex(this.index.labels) : null;
-    return this.with(this._col.map((v, i) => (Boolean(hit[i]) === replaceIfTrue ? (aligned ? aligned._col.get(i) : other) : v)));
+    return this.with(this._col.mapLike((v, i) => (Boolean(hit[i]) === replaceIfTrue ? (aligned ? aligned._col.get(i) : other) : v)));
   }
 
   // ------------------------------------------------------------ missing data
@@ -558,7 +575,7 @@ export class Series {
   fillna(value: unknown): Series {
     if (!this._col.hasNA()) return this;
     const other = value instanceof Series ? value.reindex(this.index.labels) : null;
-    return this.with(this._col.map((v, i) => (isNA(v) ? (other ? other._col.get(i) : value) : v)));
+    return this.with(this._col.mapLike((v, i) => (isNA(v) ? (other ? other._col.get(i) : value) : v)));
   }
 
   /** Propagates the last valid value forward. */
@@ -692,48 +709,48 @@ export class Series {
     const { left, right, scalar, index } = this._align(other);
     const fn = ARITH[op];
     const n = left.length;
-    const rightDtype: DType = right ? right.dtype : scalar instanceof Date ? 'datetime' : typeof scalar === 'number' || typeof scalar === 'boolean' ? (Number.isInteger(scalar) || typeof scalar === 'boolean' ? 'int64' : 'float64') : isNA(scalar) ? 'float64' : 'object';
-    const numericLike = (d: DType) => isFloatStorage(d) || d === 'bool';
+    const rightDtype: DType = right ? right.dtype : scalarDType(scalar);
+    const name = other instanceof Series && other.name !== this.name ? null : this.name;
 
     if (numericLike(left.dtype) && numericLike(rightDtype)) {
       const a = left.data as ArrayLike<number>;
       const b = right ? (right.data as ArrayLike<number>) : null;
-      const s = scalar instanceof Date ? scalar.getTime() : isNA(scalar) ? NaN : Number(scalar);
+      const sv = scalarNumber(scalar, left.dtype);
       const out = new Float64Array(n);
       for (let i = 0; i < n; i++) {
         const x = a[i];
-        const y = b ? b[i] : s;
+        const y = b ? b[i] : sv;
         out[i] = reverse ? fn(y, x) : fn(x, y);
       }
-      const ints = (d: DType) => d === 'int64' || d === 'bool';
-      let dtype: DType = 'float64';
       const lt = reverse ? rightDtype : left.dtype;
       const rt = reverse ? left.dtype : rightDtype;
-      if (lt === 'datetime' && rt === 'datetime') dtype = 'float64';
-      else if ((lt === 'datetime' || rt === 'datetime') && (op === 'add' || op === 'sub')) dtype = 'datetime';
-      else if (ints(lt) && ints(rt) && op !== 'div' && !(op === 'pow' && out.some((v) => !Number.isInteger(v))) && !out.some(Number.isNaN)) dtype = 'int64';
-      return new Series(new Column(dtype, out), { index, name: other instanceof Series && other.name !== this.name ? null : this.name });
+      const dtype = arithDType(op, lt, rt, out);
+      const meta = dtype === 'period' ? (left.dtype === 'period' ? left.meta : right!.meta) : {};
+      return new Series(new Column(dtype, out, meta), { index, name });
     }
 
-    // Generic path (strings, objects): JS operators with NA propagation.
-    const jsop: Record<string, (a: any, b: any) => unknown> = {
-      add: (a, b) => a + b, sub: (a, b) => a - b, mul: (a, b) => (typeof a === 'string' ? a.repeat(b) : typeof b === 'string' ? b.repeat(a) : a * b),
-      div: (a, b) => a / b, mod: (a, b) => a % b, pow: (a, b) => a ** b, floordiv: (a, b) => Math.floor(a / b),
-    };
-    const g = jsop[op];
+    // Generic path (strings, bigints, objects): JS operators with NA propagation.
+    const g = JS_OPS[op];
     const out = new Array(n);
     for (let i = 0; i < n; i++) {
-      const x = left.get(i);
-      const y = right ? right.get(i) : scalar;
-      out[i] = isNA(x) || isNA(y) ? null : reverse ? g(y, x) : g(x, y);
+      let x = left.get(i);
+      let y = right ? right.get(i) : scalar;
+      if (isNA(x) || isNA(y)) { out[i] = null; continue; }
+      if (typeof x === 'bigint' || typeof y === 'bigint') {
+        if (op === 'div' || op === 'pow' && Number(y) < 0) { out[i] = reverse ? Number(y) / Number(x) : Number(x) / Number(y); continue; }
+        if (typeof x === 'number') x = BigInt(Math.trunc(x));
+        if (typeof y === 'number') y = BigInt(Math.trunc(y));
+      }
+      out[i] = reverse ? g(y, x) : g(x, y);
     }
-    return new Series(out, { index, name: this.name });
+    return new Series(out, { index, name });
   }
 
   add(other: Operand): Series { return this.arith('add', other); }
   sub(other: Operand): Series { return this.arith('sub', other); }
   mul(other: Operand): Series { return this.arith('mul', other); }
   div(other: Operand): Series { return this.arith('div', other); }
+  truediv(other: Operand): Series { return this.arith('div', other); }
   mod(other: Operand): Series { return this.arith('mod', other); }
   pow(other: Operand): Series { return this.arith('pow', other); }
   floordiv(other: Operand): Series { return this.arith('floordiv', other); }
@@ -741,30 +758,38 @@ export class Series {
   rsub(other: Operand): Series { return this.arith('sub', other, true); }
   rmul(other: Operand): Series { return this.arith('mul', other, true); }
   rdiv(other: Operand): Series { return this.arith('div', other, true); }
+  rmod(other: Operand): Series { return this.arith('mod', other, true); }
+  rpow(other: Operand): Series { return this.arith('pow', other, true); }
+  rfloordiv(other: Operand): Series { return this.arith('floordiv', other, true); }
   neg(): Series { return this.mul(-1); }
 
   private compare(op: string, other: Operand): Series {
     const { left, right, scalar, index } = this._align(other);
     const test = CMP[op];
     const n = left.length;
-    const out = new Uint8Array(n);
-    const fastNum = isFloatStorage(left.dtype) || left.dtype === 'bool';
-    let s: unknown = scalar;
-    if (left.dtype === 'datetime') s = scalar instanceof Date ? scalar.getTime() : typeof scalar === 'string' ? Date.parse(scalar) : scalar;
-    else if (scalar instanceof Date) s = scalar.getTime();
-    const rightRaw = right && left.dtype === 'datetime' && right.dtype !== 'datetime' ? right.astype('datetime') : right;
+    const ordering = op !== 'eq' && op !== 'ne';
+    const nullable = NULLABLE_DTYPES.has(left.dtype) || (right !== null && NULLABLE_DTYPES.has(right.dtype));
+    const aAt = comparable(left, ordering);
+    let bAt: (i: number) => unknown;
+    let bNA: (i: number) => boolean;
+    if (right) {
+      const r = coerceLike(right, left, ordering);
+      bAt = comparable(r, ordering);
+      bNA = (i) => r.isNA(i);
+    } else {
+      const sv = coerceScalar(scalar, left, ordering);
+      bAt = () => sv;
+      bNA = () => isNA(sv);
+    }
+    const out = nullable ? new Float64Array(n) : new Uint8Array(n);
     for (let i = 0; i < n; i++) {
-      const ma = left.isNA(i);
-      const mb = rightRaw ? rightRaw.isNA(i) : isNA(s);
-      if (ma || mb) { out[i] = op === 'ne' ? 1 : 0; continue; }
-      const a = fastNum ? (left.data as ArrayLike<number>)[i] : left.raw(i);
-      const b = rightRaw ? rightRaw.raw(i) : s;
-      let c: number;
-      if (op === 'eq' || op === 'ne') c = valuesEqual(a, b) ? 0 : 1;
-      else c = compareValues(a, b);
+      if (left.isNA(i) || bNA(i)) { out[i] = nullable ? NaN : op === 'ne' ? 1 : 0; continue; }
+      const x = aAt(i);
+      const y = bAt(i);
+      const c = ordering ? compareValues(x, y) : valuesEqual(x, y) ? 0 : 1;
       out[i] = test(c) ? 1 : 0;
     }
-    return new Series(new Column('bool', out), { index, name: this.name });
+    return new Series(new Column(nullable ? 'boolean' : 'bool', out), { index, name: this.name });
   }
 
   eq(other: Operand): Series { return this.compare('eq', other); }
@@ -774,25 +799,78 @@ export class Series {
   gt(other: Operand): Series { return this.compare('gt', other); }
   ge(other: Operand): Series { return this.compare('ge', other); }
 
-  private logical(other: Operand, fn: (a: boolean, b: boolean) => boolean): Series {
+  /** Boolean logic; with the nullable `boolean` dtype NA follows Kleene logic like pandas. */
+  private logical(other: Operand, kind: 'and' | 'or' | 'xor'): Series {
     const { left, right, scalar, index } = this._align(other);
-    const out = new Uint8Array(left.length);
+    const kleene = left.dtype === 'boolean' || right?.dtype === 'boolean';
+    const val = (c: Column, i: number) => (c.isNA(i) ? (kleene ? NaN : 0) : c.get(i) ? 1 : 0);
+    const sv = isNA(scalar) ? (kleene ? NaN : 0) : scalar ? 1 : 0;
+    const out = kleene ? new Float64Array(left.length) : new Uint8Array(left.length);
     for (let i = 0; i < out.length; i++) {
-      const a = !left.isNA(i) && Boolean(left.get(i));
-      const b = right ? !right.isNA(i) && Boolean(right.get(i)) : Boolean(scalar);
-      out[i] = fn(a, b) ? 1 : 0;
+      const a = val(left, i);
+      const b = right ? val(right, i) : sv;
+      if (kind === 'and') out[i] = a === 0 || b === 0 ? 0 : a !== a || b !== b ? NaN : 1;
+      else if (kind === 'or') out[i] = a === 1 || b === 1 ? 1 : a !== a || b !== b ? NaN : 0;
+      else out[i] = a !== a || b !== b ? NaN : a !== b ? 1 : 0;
     }
-    return new Series(new Column('bool', out), { index, name: this.name });
+    return new Series(new Column(kleene ? 'boolean' : 'bool', out), { index, name: this.name });
   }
 
-  and(other: Operand): Series { return this.logical(other, (a, b) => a && b); }
-  or(other: Operand): Series { return this.logical(other, (a, b) => a || b); }
-  xor(other: Operand): Series { return this.logical(other, (a, b) => a !== b); }
+  and(other: Operand): Series { return this.logical(other, 'and'); }
+  or(other: Operand): Series { return this.logical(other, 'or'); }
+  xor(other: Operand): Series { return this.logical(other, 'xor'); }
 
   not(): Series {
+    if (this.dtype === 'boolean') {
+      const src = this._col.data as Float64Array;
+      return this.with(new Column('boolean', src.map((v) => (v !== v ? NaN : 1 - v))));
+    }
     const out = new Uint8Array(this.length);
     for (let i = 0; i < out.length; i++) out[i] = !this._col.isNA(i) && this._col.get(i) ? 0 : 1;
     return this.with(new Column('bool', out));
+  }
+
+  // --------------------------------------------------------------- assignment
+
+  /**
+   * In-place assignment by label, like `s.loc[key] = value`. A new scalar label
+   * appends a row. `value` may be a scalar, an array (one per selected row) or a
+   * Series (aligned by label).
+   */
+  setLoc(key: RowSelector | ((s: Series) => Mask), value: unknown): this {
+    const k = typeof key === 'function' ? key(this) : key;
+    if (isScalarKey(k, this.index) && !this.index.has(k as Label)) {
+      this._col = Column.fromLike([...this._col.toArray(), value], this._col);
+      this.index = new Index([...this.index.labels, k as Label], { name: this.index.name, names: this.index.names });
+      return this;
+    }
+    return this.assignAt(labelPositions(k, this.index), value);
+  }
+
+  /** In-place assignment by position, like `s.iloc[key] = value`. */
+  setIloc(key: number | readonly number[] | Mask | Slice | ((s: Series) => Mask), value: unknown): this {
+    const k = typeof key === 'function' ? key(this) : key;
+    return this.assignAt(positionalPositions(k, this.length), value);
+  }
+
+  setAt(label: Label, value: unknown): this {
+    return this.setLoc(label as RowSelector, value);
+  }
+
+  setIat(position: number, value: unknown): this {
+    return this.setIloc(position, value);
+  }
+
+  private assignAt(pos: readonly number[], value: unknown): this {
+    let at: (k: number) => unknown;
+    if (value instanceof Series) at = (k) => value.get(this.index.labels[pos[k]], null);
+    else if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+      const arr = value as ArrayLike<unknown>;
+      if (arr.length !== pos.length) throw new RangeError(`Cannot set ${arr.length} values into ${pos.length} positions`);
+      at = (k) => arr[k];
+    } else at = () => value;
+    this._col = this._col.setAt(pos, at);
+    return this;
   }
 
   any(): boolean {
@@ -895,4 +973,160 @@ export function samplePositions(length: number, n: number, seed?: number): numbe
     [pos[i], pos[j]] = [pos[j], pos[i]];
   }
   return pos.slice(0, k);
+}
+
+// ------------------------------------------------------------ operator helpers
+
+const JS_OPS: Record<string, (a: any, b: any) => unknown> = {
+  add: (a, b) => a + b,
+  sub: (a, b) => a - b,
+  mul: (a, b) => (typeof a === 'string' ? a.repeat(b) : typeof b === 'string' ? b.repeat(a) : a * b),
+  div: (a, b) => a / b,
+  mod: (a, b) => (typeof a === 'bigint' ? ((a % b) + b) % b : ((a % b) + b) % b),
+  pow: (a, b) => a ** b,
+  floordiv: (a, b) => (typeof a === 'bigint' ? (a / b) - ((a % b !== 0n && (a < 0n) !== (b < 0n)) ? 1n : 0n) : Math.floor(a / b)),
+};
+
+function numericLike(d: DType): boolean {
+  return isNumericStorage(d);
+}
+
+function scalarDType(v: unknown): DType {
+  if (isNA(v)) return 'float64';
+  if (v instanceof Date) return 'datetime';
+  if (v instanceof Timedelta) return 'timedelta';
+  if (v instanceof Period) return 'period';
+  if (typeof v === 'boolean') return 'bool';
+  if (typeof v === 'number') return Number.isInteger(v) ? 'int64' : 'float64';
+  if (typeof v === 'bigint') return 'bigint';
+  if (typeof v === 'string') return 'string';
+  return 'object';
+}
+
+function scalarNumber(v: unknown, like: DType): number {
+  if (isNA(v)) return NaN;
+  if (v instanceof Date) return v.getTime();
+  if (v instanceof Timedelta) return v.ms;
+  if (v instanceof Period) return v.ordinal;
+  if (typeof v === 'string' && like === 'timedelta') return parseTimedelta(v);
+  return Number(v);
+}
+
+/** Result dtype of a numeric kernel, following pandas' promotion rules. */
+function arithDType(op: string, lt: DType, rt: DType, out: Float64Array): DType {
+  const temporal = (d: DType) => d === 'datetime' || d === 'timedelta' || d === 'period';
+  if (temporal(lt) || temporal(rt)) {
+    if (lt === 'datetime' && rt === 'datetime') return 'timedelta';
+    if (lt === 'period' && rt === 'period') return 'int64';
+    if ((lt === 'datetime' || rt === 'datetime') && (op === 'add' || op === 'sub')) return 'datetime';
+    if ((lt === 'period' || rt === 'period') && (op === 'add' || op === 'sub')) return 'period';
+    if (lt === 'timedelta' && rt === 'timedelta') return op === 'div' ? 'float64' : op === 'floordiv' ? 'int64' : 'timedelta';
+    if (lt === 'timedelta' || rt === 'timedelta') return 'timedelta';
+    return 'float64';
+  }
+  const ints = (d: DType) => d === 'int64' || d === 'bool' || d === 'Int64' || d === 'boolean';
+  const nullable = NULLABLE_DTYPES.has(lt) || NULLABLE_DTYPES.has(rt);
+  const integral = ints(lt) && ints(rt) && op !== 'div' && !(op === 'pow' && out.some((v) => v === v && !Number.isInteger(v)));
+  if (nullable) return integral ? 'Int64' : 'Float64';
+  return integral && !out.some(Number.isNaN) ? 'int64' : 'float64';
+}
+
+/** Accessor for primitives to compare: numbers for numeric/temporal storage, codes for ordered categories. */
+function comparable(col: Column, ordering: boolean): (i: number) => unknown {
+  if (isNumericStorage(col.dtype)) {
+    const d = col.data as ArrayLike<number>;
+    return (i) => d[i];
+  }
+  if (col.dtype === 'category' && ordering) {
+    if (!col.meta.ordered) throw new TypeError('Unordered Categoricals can only compare equality or not');
+    const d = col.data as Int32Array;
+    return (i) => d[i];
+  }
+  return (i) => col.get(i);
+}
+
+function coerceLike(right: Column, left: Column, ordering: boolean): Column {
+  if ((left.dtype === 'datetime' || left.dtype === 'timedelta' || left.dtype === 'period') && right.dtype !== left.dtype) {
+    return right.astype(left.dtype, left.meta);
+  }
+  if (left.dtype === 'category' && ordering) {
+    const pos = new Map(left.meta.categories!.map((c, i) => [hashKey(c), i]));
+    return Column.from(right.toArray().map((v) => (isNA(v) ? NaN : categoryCode(pos, v))), 'float64');
+  }
+  return right;
+}
+
+function categoryCode(pos: Map<unknown, number>, v: unknown): number {
+  const c = pos.get(hashKey(v));
+  if (c === undefined) throw new TypeError(`Value ${String(v)} is not among the categories`);
+  return c;
+}
+
+function coerceScalar(v: unknown, left: Column, ordering: boolean): unknown {
+  if (isNA(v)) return null;
+  switch (left.dtype) {
+    case 'datetime':
+      return v instanceof Date ? v.getTime() : typeof v === 'string' ? parseDate(v) : v;
+    case 'timedelta':
+      return v instanceof Timedelta ? v.ms : typeof v === 'string' ? parseTimedelta(v) : v;
+    case 'period': {
+      const freq = left.meta.freq!;
+      if (v instanceof Period) return v.freq === freq ? v.ordinal : periodOrdinal(v.startTime.getTime(), freq);
+      if (v instanceof Date) return periodOrdinal(v.getTime(), freq);
+      return typeof v === 'string' ? periodOrdinal(parsePeriodString(v), freq) : v;
+    }
+    case 'category':
+      if (!ordering) return v;
+      if (!left.meta.ordered) throw new TypeError('Unordered Categoricals can only compare equality or not');
+      return categoryCode(new Map(left.meta.categories!.map((c, i) => [hashKey(c), i])), v);
+    default:
+      if (isNumericStorage(left.dtype)) {
+        if (typeof v === 'boolean') return Number(v);
+        if (v instanceof Date) return v.getTime();
+      }
+      return v;
+  }
+}
+
+export function isScalarKey(key: unknown, index: Index): boolean {
+  if (key instanceof Slice || isMask(key)) return false;
+  return !(Array.isArray(key) && !(index.nlevels > 1 && !Array.isArray(key[0])));
+}
+
+/** Numeric values of a column as numbers (bigint converted), or a TypeError. */
+export function numericView(col: Column, what = 'this operation'): ArrayLike<number> {
+  if (col.dtype === 'bigint') return Float64Array.from(col.toArray(), (v) => (v === null ? NaN : Number(v)));
+  if (!isNumericDType(col.dtype)) throw new TypeError(`Cannot compute ${what} on dtype ${col.dtype}`);
+  return col.data as ArrayLike<number>;
+}
+
+function numericResultDType(d: DType, keepInt: boolean): DType {
+  if (d === 'Int64' || d === 'boolean') return keepInt ? 'Int64' : 'Float64';
+  if (d === 'Float64') return 'Float64';
+  if ((d === 'int64' || d === 'bool') && keepInt) return 'int64';
+  return 'float64';
+}
+
+/** Best nullable dtype for a column (pandas `convert_dtypes`). */
+export function convertColumn(col: Column): Column {
+  switch (col.dtype) {
+    case 'int64': return col.astype('Int64');
+    case 'bool': return col.astype('boolean');
+    case 'float64': {
+      const d = col.data as Float64Array;
+      const integral = d.every((v) => v !== v || Number.isInteger(v));
+      return col.astype(integral && d.some((v) => v === v) ? 'Int64' : 'Float64');
+    }
+    case 'object': {
+      const vals = col.toArray().filter((v) => !isNA(v));
+      if (vals.length === 0) return col;
+      if (vals.every((v) => typeof v === 'boolean')) return col.astype('boolean');
+      if (vals.every((v) => typeof v === 'string')) return col.astype('string');
+      if (vals.every((v) => typeof v === 'number' && Number.isInteger(v))) return col.astype('Int64');
+      if (vals.every((v) => typeof v === 'number')) return col.astype('Float64');
+      return col;
+    }
+    default:
+      return col;
+  }
 }

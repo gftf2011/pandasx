@@ -16,6 +16,11 @@ export function sortKeyFromColumn(col: Column, ascending: boolean): SortKey {
     const data = col.data as ArrayLike<number>;
     return { values: data, missing: (i) => Number.isNaN(data[i]), ascending };
   }
+  if (col.dtype === 'category') {
+    // Categoricals sort by category order, not by value.
+    const codes = col.data as Int32Array;
+    return { values: codes, missing: (i) => codes[i] < 0, ascending };
+  }
   const data = col.toArray();
   return { values: data, missing: (i) => col.isNA(i), ascending };
 }
@@ -24,7 +29,7 @@ export function sortKeyFromColumn(col: Column, ascending: boolean): SortKey {
 export function argsort(keys: readonly SortKey[], n: number, naPosition: NaPosition = 'last'): number[] {
   const order = Array.from({ length: n }, (_, i) => i);
   const naSign = naPosition === 'last' ? 1 : -1;
-  const numericOnly = keys.every((k) => k.values instanceof Float64Array || k.values instanceof Uint8Array);
+  const numericOnly = keys.every((k) => k.values instanceof Float64Array || k.values instanceof Uint8Array || k.values instanceof Int32Array);
   order.sort((a, b) => {
     for (const k of keys) {
       const ma = k.missing(a);

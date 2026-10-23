@@ -8,6 +8,17 @@ export { Index, Slice, slice } from './core/indexes.ts';
 export { DISPLAY as options } from './core/format.ts';
 export { StringMethods, DatetimeMethods } from './accessors.ts';
 export type { DType, Label, AggName } from './core/types.ts';
+export { Timedelta, Period, type TimedeltaParts, type PeriodFreq } from './core/time.ts';
+export { CategoricalMethods } from './accessors.ts';
+import { Series as SeriesClass } from './series.ts';
+
+/** pandas' `pd.NA`: missing values of nullable dtypes read back as `null`. */
+export const NA = null;
+
+/** Builds a categorical Series, like `pd.Categorical(values, categories, ordered)`. */
+export function categorical(values: Iterable<unknown>, options: { categories?: readonly unknown[]; ordered?: boolean; name?: string } = {}): SeriesClass {
+  return new SeriesClass([...values], { name: options.name }).astype('category', options);
+}
 
 import { isNA as isMissing } from './core/values.ts';
 

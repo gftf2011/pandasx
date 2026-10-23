@@ -141,6 +141,10 @@ function inferColumn(raw: readonly string[], na: ReadonlySet<string>, trueSet: R
     return Column.from(values.map((v) => (v === null ? null : forced === 'bool' ? trueSet.has(v) : numeric ? toNum(clean(v)) : v)), forced);
   }
   if (!any) return Column.full(values.length, null, 'float64');
+  if (numeric && ints && values.some((v) => v !== null && !Number.isSafeInteger(Number(clean(v))))) {
+    // Integers beyond 2^53 keep full precision as bigint.
+    return Column.from(values.map((v) => (v === null ? null : BigInt(clean(v)))), 'bigint');
+  }
   if (numeric) {
     const out = new Float64Array(values.length);
     for (let i = 0; i < values.length; i++) out[i] = values[i] === null ? NaN : toNum(clean(values[i]!));

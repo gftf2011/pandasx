@@ -62,6 +62,7 @@ function maybeNumber(k: string): Label {
 function jsonValue(v: unknown): unknown {
   if (typeof v === 'number' && !Number.isFinite(v)) return null;
   if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'bigint') return Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
   return v;
 }
 
