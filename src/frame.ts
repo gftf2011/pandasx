@@ -1456,7 +1456,7 @@ function pipeTable(columns: { header: string; cells: string[]; numeric: boolean 
 function assertUniqueColumns(keys: readonly string[]): void {
   const seen = new Set<string>();
   for (const k of keys) {
-    if (seen.has(k)) throw new Error(`Duplicate column label "${k.split(COL_SEP).join(', ')}": node-pandas requires unique column labels`);
+    if (seen.has(k)) throw new Error(`Duplicate column label "${k.split(COL_SEP).join(', ')}": pandasx requires unique column labels`);
     seen.add(k);
   }
 }

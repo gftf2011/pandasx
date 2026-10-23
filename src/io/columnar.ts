@@ -174,7 +174,7 @@ export async function toParquet(df: DataFrame, path?: string, o: ToParquetOption
   });
   const buf = Buffer.from(w.parquetWriteBuffer({
     columnData: columnData.map(({ name, data }) => ({ name, data })), schema, codec, rowGroupSize: o.rowGroupSize,
-    kvMetadata: [{ key: 'pandas', value: JSON.stringify({ ...meta, creator: { library: 'node-pandas' }, pandas_version: '2.2.0' }) }],
+    kvMetadata: [{ key: 'pandas', value: JSON.stringify({ ...meta, creator: { library: 'pandasx' }, pandas_version: '2.2.0' }) }],
   }));
   if (path) (await import('node:fs')).writeFileSync(path, buf);
   return buf;
@@ -228,7 +228,7 @@ export async function toArrow(df: DataFrame, options: { index?: boolean } = {}):
   const vectors: Record<string, import('apache-arrow').Vector> = {};
   for (const [name, c] of columns) vectors[name] = arrowVector(A, c);
   const table = new A.Table(vectors);
-  const schema = new A.Schema(table.schema.fields, new Map([['pandas', JSON.stringify({ ...meta, creator: { library: 'node-pandas' }, pandas_version: '2.2.0' })]]));
+  const schema = new A.Schema(table.schema.fields, new Map([['pandas', JSON.stringify({ ...meta, creator: { library: 'pandasx' }, pandas_version: '2.2.0' })]]));
   return new A.Table(schema, table.batches);
 }
 

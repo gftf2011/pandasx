@@ -128,7 +128,7 @@ The parity suite compares every case with real pandas; it needs a Python with pa
 
 ## Releasing
 
-Bump `version` in `package.json` (e.g. `npm version patch`), push to `main`, then run **Actions → Publish to npm → Run workflow**. The workflow fails if that version is already on npm. It authenticates with npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers): on npmjs.com the package lists `gftf2011/pandasjs` with workflow `publish.yml` as its trusted publisher, so no token is stored.
+Bump `version` in `package.json` (e.g. `npm version patch`), push to `main`, then run **Actions → Publish to npm → Run workflow**. The workflow fails if that version is already on npm. It authenticates with npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers): on npmjs.com the package lists `gftf2011/pandasx` with workflow `publish.yml` as its trusted publisher, so no token is stored.
 
 ## License
 

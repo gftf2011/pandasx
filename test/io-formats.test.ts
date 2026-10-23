@@ -9,7 +9,7 @@ import * as pd from '../src/index.ts';
 import { DataFrame, Series } from '../src/index.ts';
 
 const fx = (f: string) => join(import.meta.dirname, 'fixtures', f);
-const tmp = mkdtempSync(join(tmpdir(), 'node-pandas-io-'));
+const tmp = mkdtempSync(join(tmpdir(), 'pandasx-io-'));
 const out = (f: string) => join(tmp, f);
 
 /** The frame every fixture holds. */

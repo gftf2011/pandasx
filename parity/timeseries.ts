@@ -105,7 +105,7 @@ put('g_roll2_mean_idx', () => (g.groupby('k').get('v').rolling(2).mean() as any)
 put('g_exp_sum', () => g.groupby('k').get('v').expanding().sum());
 put('g_ewm_mean', () => g.groupby('k').get('v').ewm({ alpha: 0.5 }).mean());
 // compare
-const KNOWN: Record<string, string> = { roll3_hamming_std: 'pandas assigns window weights by absolute position (i % window) for weighted var/std, which disagrees with its own weighted mean; node-pandas slides the weights with the window' };
+const KNOWN: Record<string, string> = { roll3_hamming_std: 'pandas assigns window weights by absolute position (i % window) for weighted var/std, which disagrees with its own weighted mean; pandasx slides the weights with the window' };
 let bad = 0;
 const close = (a: unknown, b: unknown): boolean => {
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => close(x, b[i]));

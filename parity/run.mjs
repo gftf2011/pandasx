@@ -1,4 +1,4 @@
-// Compares node-pandas against real pandas. Needs a Python with pandas + scipy:
+// Compares pandasx against real pandas. Needs a Python with pandas + scipy:
 //   PANDAS_PYTHON=/path/to/venv/bin/python npm run parity
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const python = process.env.PANDAS_PYTHON ?? 'python3';
-const dir = mkdtempSync(join(tmpdir(), 'node-pandas-parity-'));
+const dir = mkdtempSync(join(tmpdir(), 'pandasx-parity-'));
 const suites = process.argv.slice(2).length ? process.argv.slice(2) : readdirSync(here).filter((f) => f.endsWith('.py') && readdirSync(here).includes(f.replace(/\.py$/, '.ts'))).map((f) => f.slice(0, -3)).sort();
 let failed = false;
 for (const suite of suites) {

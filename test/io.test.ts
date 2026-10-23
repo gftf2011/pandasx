@@ -25,7 +25,7 @@ describe('CSV', () => {
   });
 
   it('round-trips through a file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'node-pandas-'));
+    const dir = mkdtempSync(join(tmpdir(), 'pandasx-'));
     const path = join(dir, 'out.csv');
     const df = new DataFrame({ a: [1, 2], b: ['x,y', null], c: [true, false] });
     df.toCsv(path, { index: false });

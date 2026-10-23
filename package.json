@@ -69,6 +69,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gftf2011/pandasjs.git"
+    "url": "git+https://github.com/gftf2011/pandasx.git"
+  },
+  "homepage": "https://github.com/gftf2011/pandasx#readme",
+  "bugs": {
+    "url": "https://github.com/gftf2011/pandasx/issues"
   }
 }

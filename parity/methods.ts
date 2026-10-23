@@ -51,7 +51,7 @@ const d2 = new DataFrame({ a: [1, 2, 3, 4], b: ['x', 'y', 'x', 'z'], c: [10, 20,
 put('q1', () => d2.query('a > 1 and b != "z"')); put('q2', () => d2.query('b in ["x", "z"] | c >= 30')); put('q3', () => d2.query('1 < a <= 3 and not b == "y"'));
 put('q4', () => d2.query('c / a == 10 and a % 2 == 0')); put('q5', () => d2.query('b.str.contains("x") or index == 3'));
 put('ev1', () => d2.eval('a * 2 + c ** 0.5')); put('ev2', () => d2.eval('d = a + c'));
-const KNOWN: Record<string, string> = { interp_pad: "method='pad' was removed from interpolate in pandas 3; node-pandas keeps it" };
+const KNOWN: Record<string, string> = { interp_pad: "method='pad' was removed from interpolate in pandas 3; pandasx keeps it" };
 let bad = 0;
 const close = (a: any, b: any): boolean => {
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => close(v, b[i]));
