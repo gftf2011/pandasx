@@ -1,4 +1,4 @@
-# pandasjs
+# pandasx
 
 [pandas](https://pandas.pydata.org/)-style `Series` and `DataFrame` for Node.js, written in TypeScript.
 
@@ -8,7 +8,7 @@
 - **No required dependencies.** Excel, Parquet, Feather and HDF5 use optional packages that only the people who need them install.
 
 ```bash
-npm install @gftf2011/pandasjs
+npm install pandasx
 ```
 
 Requires Node.js ≥ 22.18.
@@ -16,7 +16,7 @@ Requires Node.js ≥ 22.18.
 ## Example
 
 ```ts
-import * as pd from '@gftf2011/pandasjs';
+import * as pd from 'pandasx';
 
 const df = new pd.DataFrame({
   region: ['SP', 'RJ', 'SP', 'MG', 'RJ', 'SP'],
@@ -42,11 +42,11 @@ console.log(summary);
 // SP        437.5      17.5   25
 ```
 
-## From pandas to pandasjs
+## From pandas to pandasx
 
 Python overloads `[]` and operators. JavaScript can't, so those forms become methods:
 
-| pandas (Python) | pandasjs |
+| pandas (Python) | pandasx |
 |---|---|
 | `df['a']`, `df[['a','b']]`, `df[mask]` | `df.get('a')`, `df.get(['a','b'])`, `df.get(mask)` |
 | `df['c'] = v` | `df.set('c', v)` |

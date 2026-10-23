@@ -1,5 +1,5 @@
 {
-  "name": "@gftf2011/pandasjs",
+  "name": "pandasx",
   "version": "0.1.0",
   "description": "pandas-like DataFrame and Series for Node.js, written in TypeScript",
   "type": "module",
@@ -70,8 +70,5 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gftf2011/pandasjs.git"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }
