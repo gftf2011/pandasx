@@ -8,7 +8,7 @@
 - **No required dependencies.** Excel, Parquet, Feather and HDF5 use optional packages that only the people who need them install.
 
 ```bash
-npm install pandasjs
+npm install @gftf2011/pandasjs
 ```
 
 Requires Node.js ≥ 22.18.
@@ -16,7 +16,7 @@ Requires Node.js ≥ 22.18.
 ## Example
 
 ```ts
-import * as pd from 'pandasjs';
+import * as pd from '@gftf2011/pandasjs';
 
 const df = new pd.DataFrame({
   region: ['SP', 'RJ', 'SP', 'MG', 'RJ', 'SP'],
