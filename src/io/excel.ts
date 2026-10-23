@@ -159,6 +159,8 @@ export interface ToExcelOptions {
   freezePanes?: readonly [number, number];
   /** Merge repeated MultiIndex labels (default true). */
   mergeCells?: boolean;
+  /** Per-cell style (used by Styler.toExcel): CSS colours and bold. */
+  cellStyle?: (row: number, col: number) => { fill?: string; color?: string; bold?: boolean };
 }
 
 function writeSheet(wb: ExcelJSType.Workbook, df: DataFrame, o: ToExcelOptions): void {
@@ -215,6 +217,10 @@ function writeSheet(wb: ExcelJSType.Workbook, df: DataFrame, o: ToExcelOptions):
       if (typeof v === 'bigint') v = Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
       else if (typeof v === 'object' && !(v instanceof Date)) v = String(v);
       cell.value = v as ExcelJSType.CellValue;
+      const st = o.cellStyle?.(i, j);
+      const argb = (c?: string) => (c && /^#[0-9a-f]{6}$/i.test(c) ? 'FF' + c.slice(1).toUpperCase() : undefined);
+      if (st && argb(st.fill)) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: argb(st.fill) } };
+      if (st && (argb(st.color) || st.bold)) cell.font = { color: argb(st.color) ? { argb: argb(st.color) } : undefined, bold: st.bold || undefined };
       if (v instanceof Date) cell.numFmt = o.datetimeFormat ?? (v.getTime() % 86_400_000 === 0 ? 'yyyy-mm-dd' : 'yyyy-mm-dd hh:mm:ss');
       else if (typeof v === 'number' && o.floatFormat && !Number.isInteger(v)) cell.numFmt = o.floatFormat;
     });

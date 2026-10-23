@@ -6,6 +6,7 @@ import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
 import { correlation, covariance, interpolate, kurtosis, rankPositions, skewness, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
 import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from './window.ts';
 import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
+import { plotAccessor, type PlotAccessor } from './plot.ts';
 import { onAxis, unstack, xs } from './levels.ts';
 import { combineFirst, compare, explodeSeries, update } from './combine.ts';
 import { toHdf } from './io/hdf.ts';
@@ -1036,6 +1037,11 @@ export class Series {
     return compare(this, other, options);
   }
 
+  /** Bytes used by the values (and index), like `memory_usage`. */
+  memoryUsage(options: { index?: boolean; deep?: boolean } = {}): number {
+    return (this.toFrame('v').memoryUsage(options).sum() as number);
+  }
+
   /** CSV text of the series (with its index); writes to `path` when given. */
   toCsv(path?: string, options: Parameters<DataFrame['toCsv']>[1] = {}): string {
     return this.toFrame(this.name ?? '0').toCsv(path, options);
@@ -1048,6 +1054,11 @@ export class Series {
   /** Writes HDF5 in pandas' 'table' format (requires the optional `h5wasm`). */
   toHdf(path: string, key: string, options: { mode?: 'a' | 'w' } = {}): Promise<void> {
     return toHdf(this, path, key, options);
+  }
+
+  /** SVG charts: `plot({ kind })` or `plot.line()`, `plot.bar()`, `plot.hist()`, ... */
+  get plot(): PlotAccessor {
+    return plotAccessor(this);
   }
 
   // ------------------------------------------------------------- MultiIndex

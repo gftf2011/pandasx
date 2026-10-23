@@ -36,6 +36,8 @@ describe('MultiIndex columns', () => {
     assert.deepEqual((g.get('price') as unknown as DataFrame).columns, ['sum', 'max']);
     assert.equal(g.toString().split('\n').slice(0, 3).join('\n'), '        units       price\n          sum  max    sum  max\nregion');
     assert.deepEqual(g.flattenColumns().columns, ['units_sum', 'units_max', 'price_sum', 'price_max']);
+    assert.deepEqual(g.sortValues(['units', 'sum']).index.toArray(), ['E', 'S', 'N']);
+    assert.deepEqual(g.sortValues([['price', 'max'], ['units', 'sum']], { ascending: false }).index.toArray(), ['N', 'E', 'S']);
     assert.throws(() => g.droplevel(0, { axis: 1 }), /Duplicate column label/);
     assert.deepEqual(g.iloc(null, [0, 2]).droplevel(1, { axis: 1 }).columns, ['units', 'price']);
   });

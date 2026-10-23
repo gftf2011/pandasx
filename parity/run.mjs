@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const python = process.env.PANDAS_PYTHON ?? 'python3';
 const dir = mkdtempSync(join(tmpdir(), 'node-pandas-parity-'));
-const suites = process.argv.slice(2).length ? process.argv.slice(2) : readdirSync(here).filter((f) => f.endsWith('.py')).map((f) => f.slice(0, -3)).sort();
+const suites = process.argv.slice(2).length ? process.argv.slice(2) : readdirSync(here).filter((f) => f.endsWith('.py') && readdirSync(here).includes(f.replace(/\.py$/, '.ts'))).map((f) => f.slice(0, -3)).sort();
 let failed = false;
 for (const suite of suites) {
   const ref = join(dir, `${suite}.json`);

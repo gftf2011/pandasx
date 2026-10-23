@@ -5,12 +5,66 @@ import { Interval } from './interval.ts';
 import { formatOffset, tzOffset } from './tz.ts';
 import { NULLABLE_DTYPES, type Label } from './types.ts';
 
+/** Display options, like `pd.options.display` (mutable; see setOption / optionContext). */
 export const DISPLAY = {
+  /** Rows shown before truncating (pandas `display.max_rows`). */
   maxRows: 60,
+  /** Rows shown when truncated. */
   minRows: 10,
+  /** Columns shown before truncating (0 = no limit besides `width`). */
   maxColumns: 20,
+  /** Decimal places for floats. */
   precision: 6,
+  /** Line width; wider frames hide middle columns. */
+  width: 80,
+  /** Longest cell text before it is cut with '...'. */
+  maxColwidth: 50,
+  /** Custom float formatter. */
+  floatFormat: null as ((v: number) => string) | null,
+  /** Floats smaller than this (in absolute value) show as 0. */
+  chopThreshold: null as number | null,
+  /** Show '[n rows x m columns]': only when truncated ('truncate'), always (true) or never (false). */
+  showDimensions: 'truncate' as boolean | 'truncate',
+  /** Alignment of column headers. */
+  colheaderJustify: 'right' as 'left' | 'right',
 };
+
+const DEFAULTS = { ...DISPLAY };
+type DisplayKey = keyof typeof DISPLAY;
+
+function optionKey(name: string): DisplayKey {
+  const bare = name.replace(/^display\./, '').replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  if (!(bare in DISPLAY)) throw new Error(`No such option: ${name}`);
+  return bare as DisplayKey;
+}
+
+/** Sets an option, e.g. `setOption('display.max_rows', 100)` or `setOption('display.precision', 2)`. */
+export function setOption(name: string, value: unknown): void {
+  (DISPLAY as Record<string, unknown>)[optionKey(name)] = value;
+}
+
+export function getOption(name: string): unknown {
+  return DISPLAY[optionKey(name)];
+}
+
+/** Restores one option (or 'all') to its default. */
+export function resetOption(name: string): void {
+  if (name === 'all') Object.assign(DISPLAY, DEFAULTS);
+  else { const k = optionKey(name); (DISPLAY as Record<string, unknown>)[k] = DEFAULTS[k]; }
+}
+
+/** Runs `fn` with temporary options, like `with pd.option_context(...)`. */
+export function optionContext<T>(options: Record<string, unknown>, fn: () => T): T {
+  const saved = Object.keys(options).map((k) => [k, getOption(k)] as const);
+  for (const [k, v] of Object.entries(options)) setOption(k, v);
+  try { return fn(); } finally { for (const [k, v] of saved) setOption(k, v); }
+}
+
+/** Cuts long cell text to `maxColwidth`. */
+export function clip(s: string): string {
+  const m = DISPLAY.maxColwidth;
+  return m && s.length > m ? s.slice(0, Math.max(0, m - 3)) + '...' : s;
+}
 
 /** Positions to display, with `null` marking the "..." gap. */
 export function displayPositions(n: number, max: number, keep: number): (number | null)[] {
@@ -58,10 +112,13 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
         if (Number(v.toFixed(d)) === Number(v.toFixed(DISPLAY.precision))) { decimals = Math.max(decimals, d); break; }
       }
     }
+    const chop = DISPLAY.chopThreshold;
     fmt = (p) => {
-      const v = data[p];
+      let v = data[p];
       if (Number.isNaN(v)) return na;
       if (!Number.isFinite(v)) return v > 0 ? 'inf' : '-inf';
+      if (chop !== null && Math.abs(v) < chop) v = 0;
+      if (DISPLAY.floatFormat) return DISPLAY.floatFormat(v);
       return exp ? v.toExponential(DISPLAY.precision) : v.toFixed(decimals);
     };
   } else if (col.dtype === 'datetime') {
@@ -77,7 +134,7 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
   } else if (col.dtype === 'category') {
     fmt = (p) => (col.isNA(p) ? 'NaN' : formatScalar(col.get(p)));
   } else {
-    fmt = (p) => formatScalar(col.get(p));
+    fmt = (p) => clip(formatScalar(col.get(p)));
   }
   return positions.map((p) => (p === null ? '...' : fmt(p)));
 }

@@ -1,11 +1,11 @@
 # node-pandas
 
-`Series` e `DataFrame` no estilo do [pandas](https://pandas.pydata.org/) para Node.js, escritos em TypeScript e sem dependências de runtime.
+`Series` e `DataFrame` no estilo do [pandas](https://pandas.pydata.org/) para Node.js, escritos em TypeScript.
 
-- Armazenamento **colunar e tipado**: colunas numéricas e datas ficam em `Float64Array`, booleanos em `Uint8Array`.
+- Armazenamento **colunar e tipado**: números e datas em `Float64Array`, booleanos em `Uint8Array` e categorias em `Int32Array`.
 - API **fiel ao pandas**, com nomes em camelCase (`sort_values` → `sortValues`, `read_csv` → `readCsv`).
-- Semântica de **valores ausentes** igual à do pandas: `NaN` nos números, `null` nos textos, NA ignorado nas agregações por padrão.
-- **Alinhamento por índice** nas operações entre Series e DataFrames.
+- **Verificado contra o pandas real**: 214 casos de paridade (`npm run parity`) mais fixtures gravados pelo pandas 3.1.
+- **Sem dependências obrigatórias.** Excel, Parquet, Feather e HDF5 usam pacotes opcionais, instalados só por quem precisa.
 
 ```bash
 npm install node-pandas
@@ -27,79 +27,88 @@ const df = new pd.DataFrame({
 // ou: const df = pd.readCsv('vendas.csv', { parseDates: ['data'] });
 
 const resumo = df
-  .loc(df.get('quantidade').gt(0))
+  .query('quantidade > 0')
   .assign({ receita: (d) => d.get('quantidade').mul(d.get('preco')) })
   .groupby('regiao')
   .agg({ receita: 'sum', quantidade: ['mean', 'max'] })
-  .sortValues('receita', { ascending: false });
+  .sortValues(['receita', 'sum']);
 
 console.log(resumo);
-//         receita  quantidade_mean  quantidade_max
+//         receita  quantidade
+//             sum        mean  max
 // regiao
-// SP        437.5             17.5              25
-// RJ        142.0              8.0              12
-// MG         83.3              7.0               7
+// MG         83.3         7.0    7
+// RJ        142.0         8.0   12
+// SP        437.5        17.5   25
 ```
-
-`console.log` imprime a tabela formatada como no pandas (com truncamento para tabelas grandes).
 
 ## Do pandas para o node-pandas
 
-O Python tem sobrecarga de operadores e de `[]`. O JavaScript não tem, então essas formas viram métodos:
+O Python tem sobrecarga de `[]` e de operadores. O JavaScript não tem, então essas formas viram métodos:
 
 | pandas (Python) | node-pandas |
 |---|---|
-| `df['a']` | `df.get('a')` |
-| `df[['a', 'b']]` | `df.get(['a', 'b'])` |
-| `df[df.a > 1]` | `df.loc(df.get('a').gt(1))` |
-| `df['c'] = valores` | `df.set('c', valores)` |
-| `df.loc['x', 'a']` | `df.loc('x', 'a')` |
-| `df.loc['x':'z']` | `df.loc(pd.slice('x', 'z'))` (fim inclusivo) |
-| `df.iloc[1:3, 0]` | `df.iloc(pd.slice(1, 3), 0)` |
-| `df.loc[:, 'a':'c']` | `df.loc(null, pd.slice('a', 'c'))` |
-| `s + 1`, `s * t`, `s / t` | `s.add(1)`, `s.mul(t)`, `s.div(t)` |
-| `s == 1`, `s >= t` | `s.eq(1)`, `s.ge(t)` |
-| `(a > 1) & (b < 2)`, `~m` | `a.gt(1).and(b.lt(2))`, `m.not()` |
-| `df.query('a > 1')` | `df.query((row) => row.a > 1)` |
-| `df.apply(f, axis=1)` | `df.apply((row) => ..., { axis: 1 })` (a linha chega como objeto JS) |
+| `df['a']`, `df[['a','b']]`, `df[mask]` | `df.get('a')`, `df.get(['a','b'])`, `df.get(mask)` |
+| `df['c'] = v` | `df.set('c', v)` |
+| `df.loc['x', 'a']`, `df.loc['x':'z']` | `df.loc('x', 'a')`, `df.loc(pd.slice('x', 'z'))` |
+| `df.loc[mask, 'a'] = 0` | `df.setLoc(mask, 'a', 0)` (também `setIloc`, `setAt`, `setIat`) |
+| `s + 1`, `s == 1`, `(a > 1) & ~b` | `s.add(1)`, `s.eq(1)`, `a.gt(1).and(b.not())` |
+| `df.query('a > 1 and b == "x"')` | `df.query('a > 1 and b == "x"')` (a mesma sintaxe) |
 | `df.groupby('k')['v'].sum()` | `df.groupby('k').get('v').sum()` |
-| `.agg(total=('v', 'sum'))` | `.agg({ total: ['v', 'sum'] })` |
-| `pd.read_csv(..., index_col='id')` | `pd.readCsv(..., { indexCol: 'id' })` |
-| `df.to_dict('records')` | `df.toRecords()` |
+| `df[('preco', 'min')]` (colunas MultiIndex) | `df.column(['preco', 'min'])` |
+| `pd.option_context('display.precision', 2)` | `pd.optionContext({ 'display.precision': 2 }, () => ...)` |
+| `df.plot.bar()` (matplotlib) | `df.plot.bar()` → SVG |
 
-## O que já existe
+## O que existe
 
-**Series**: `loc`/`iloc`/`at`/`iat`/`get`, `head`/`tail`/`sample`, aritmética e comparações com alinhamento (`add`, `sub`, `mul`, `div`, `mod`, `pow`, `eq`, `gt`, ...), `and`/`or`/`not`, `sum`, `mean`, `median`, `std`, `var`, `min`, `max`, `count`, `quantile`, `describe`, `valueCounts`, `unique`, `nunique`, `mode`, `idxmax`, `cumsum`/`cumprod`/`cummax`/`cummin`, `shift`, `diff`, `pctChange`, `rank`, `map`, `apply`, `astype`, `replace`, `where`/`mask`, `isin`, `between`, `clip`, `round`, `abs`, `isna`/`fillna`/`dropna`/`ffill`/`bfill`/`interpolate`, `sortValues`/`sortIndex`, `nlargest`/`nsmallest`, `duplicated`/`dropDuplicates`, `reindex`, `groupby`.
+**Tipos**: `int64`, `float64`, `bool`, os anuláveis `Int64`, `Float64` e `boolean` (lógica de Kleene), `string`, `category` (com o acessor `.cat`), `datetime` com fuso horário, `timedelta`, `period`, `bigint` (inteiros exatos acima de 2^53) e `object`. Há também `convertDtypes`.
 
-**Acessores**: `s.str` (`lower`, `upper`, `strip`, `contains`, `startswith`, `replace`, `split`, `get`, `extract`, `len`, `pad`, `zfill`, ...) e `s.dt` (`year`, `month`, `day`, `hour`, `dayofweek`, `quarter`, `normalize`, `strftime`, ...).
+**Seleção e atribuição**: `get`, `loc`, `iloc`, `at`, `iat`, `xs` e os respectivos `set*`, com crescimento por rótulo novo; `query` e `eval` com expressões em string (`and`/`or`/`not`, `in`, comparações encadeadas, `@variáveis`, nomes entre crases, `nome.str.startswith(...)`).
 
-**DataFrame**: criação a partir de colunas, de registros ou de linhas; `get`/`set`/`assign`/`insert`/`pop`/`drop`/`rename`, `loc`/`iloc`/`at`/`iat`, `query`, `filter`, `selectDtypes`, agregações por coluna ou por linha (`{ axis: 1 }`), `agg`, `describe`, `info`, `corr`/`cov`, `apply`/`map`, operações elemento a elemento, `fillna`/`dropna` (`how`, `thresh`, `subset`), `sortValues` com várias chaves, `setIndex`/`resetIndex`, `reindex`, `dropDuplicates`, `valueCounts`, `melt`, `pivotTable`, `transpose`/`T`, `join`, `merge`.
+**Estatística**: as agregações usuais e mais `sem`, `skew`, `kurt`, `quantile` (todas as interpolações), `rank` (5 métodos), `corr` (Pearson, Spearman e Kendall), `cov`, `corrwith`, `autocorr`, `describe`, `valueCounts`, `mode` e as operações acumuladas.
 
-**GroupBy**: uma ou várias chaves (o índice fica com rótulos em tupla), `sort`/`dropna`/`asIndex`, `size`, `sum`/`mean`/.../`first`/`last`/`nunique`, `agg` (por coluna, lista ou nomeado), `apply`, `transform`, `filter`, `head`/`tail`, `cumcount`, `getGroup`, iteração com `for...of`.
+**Dados ausentes**: `isna`, `fillna`, `dropna`, `ffill`, `bfill` e `interpolate` (linear, time, index, nearest, zero, quadratic, cubic, spline, polynomial, pchip e akima, com `limit`, `limitDirection` e `limitArea`).
 
-**Combinação**: `merge` (`inner`, `left`, `right`, `outer`, `cross`, `leftOn`/`rightOn`, `suffixes`, `indicator`, `validate`) e `concat` (eixos 0 e 1, `join: 'inner' | 'outer'`, `ignoreIndex`).
+**Strings**: o acessor `.str` completo, incluindo `split` e `extract` com `expand`, `extractall`, `findall`, `getDummies`, `wrap`, `translate` e `normalize`.
 
-**I/O**: `readCsv`/`parseCsv` (aspas RFC 4180, `sep`, `header`, `names`, `indexCol`, `usecols`, `dtype`, `naValues`, `parseDates`, `nrows`, `skiprows`, `thousands`), `toCsv`, `readJson`/`toJson` (orients `records`, `columns`, `index`, `split`, `values` e JSON lines).
+**Séries temporais**: `rolling` (por número de linhas ou por tempo, com `center`, `closed` e `winType`), `expanding`, `ewm`, `resample` (calendário e frequência fixa, `closed`, `label`, `origin`, `ohlc` e upsampling), `asfreq`, `shift` com `freq` e offsets (`B`, `W-MON`, `ME`, `MS`, `QE`, `YS`, `BME`, `SME`, `DateOffset`). Também há `dateRange`, `bdateRange`, `periodRange`, `timedeltaRange`, `toDatetime` (com `format`, `errors`, `utc`, `dayfirst` e `unit`), `toTimedelta`, fusos IANA (`tzLocalize`/`tzConvert`, com tratamento de horário de verão), o acessor `.dt` completo, `atTime`, `betweenTime` e `truncate`.
 
-**Datas**: `toDatetime`, `dateRange` (`ms`, `s`, `min`, `h`, `D`, `W`, `MS`).
+**GroupBy**: agrupa por coluna, Series, array, função ou nível do índice; tem `agg` (por lista, dict ou agregação nomeada), `transform`, `filter`, `apply`, `shift`, `diff`, `rank`, `cumsum`, `nth`, `quantile`, `describe`, `ohlc`, e `rolling`/`expanding`/`ewm`/`resample` por grupo.
 
-## Tipos de dados
+**MultiIndex e reshape**: MultiIndex nas linhas e nas colunas (`fromTuples`, `fromProduct`, `droplevel`, `swaplevel`, `xs`, `loc` parcial), `stack`, `unstack`, `pivot`, `pivotTable` (com `margins`), `crosstab`, `melt`, `wideToLong`, `explode`, `getDummies`/`fromDummies`, `cut`/`qcut` (com `Interval`), `factorize`, `merge` (inclusive por índice), `mergeAsof`, `mergeOrdered`, `join`, `concat`, `combineFirst`, `update` e `compare`.
 
-| dtype | armazenamento | valor ausente |
-|---|---|---|
-| `int64` | `Float64Array` (inteiros exatos até 2^53) | não aceita; vira `float64` |
-| `float64` | `Float64Array` | `NaN` |
-| `bool` | `Uint8Array` | não aceita; vira `object` |
-| `datetime` | `Float64Array` (epoch em ms, UTC) | `NaN` (exibido como `NaT`) |
-| `string` | `Array` | `null` |
-| `object` | `Array` | `null` |
+**Entrada e saída**:
+
+| Formato | Leitura | Escrita | Depende de |
+|---|---|---|---|
+| CSV, TSV, largura fixa | `readCsv`, `readCsvAsync`, `readCsvChunks` (streaming), `readTable`, `readFwf` | `toCsv` | nada |
+| JSON e JSON Lines | `readJson`, `readJsonAsync` | `toJson` | nada |
+| HTML | `readHtml` | `toHtml`, `df.style.toHtml()` | nada |
+| XML | `readXml` | `toXml` | nada |
+| SQL | `readSql`, `readSqlQuery`, `readSqlTable`, `readSqlChunks` | `toSql` | `node:sqlite` (nativo), better-sqlite3, pg ou mysql2 |
+| Excel `.xlsx` | `readExcel` | `toExcel`, `ExcelWriter` | `exceljs` |
+| Parquet | `readParquet` | `toParquet` | `hyparquet`, `hyparquet-writer` |
+| Feather / Arrow | `readFeather`, `fromArrow` | `toFeather`, `toArrow` | `apache-arrow` |
+| HDF5 | `readHdf` (formatos fixed e table) | `toHdf` (formato table) | `h5wasm` |
+| LaTeX, Markdown | | `toLatex`, `toMarkdown` | nada |
+
+A compressão (gzip, zstd, brotli, deflate e zip) é detectada pela extensão ou pelos bytes iniciais. URLs são lidas pelas variantes `*Async`.
+
+**Exibição**: `console.log` imprime como o pandas, inclusive escondendo colunas para caber em `display.width`. Há `setOption`, `getOption`, `resetOption` e `optionContext`, além de `info()` e `memoryUsage()`.
+
+**Gráficos** (`df.plot`, retornam SVG): line, bar, barh, hist, box, kde, area, pie, scatter, hexbin e `subplots`. Os gráficos usam uma paleta validada para daltonismo, com tema claro e escuro automáticos, tooltip nativo em cada marca e rótulos diretos. Com `path: 'x.html'`, a saída é uma página com o gráfico e a tabela de dados.
+
+**Styler** (`df.style`): `highlightMax`, `highlightMin`, `highlightNull`, `highlightBetween`, `highlightQuantile`, `backgroundGradient`, `textGradient`, `bar`, `format` (com a mini-linguagem do Python, por exemplo `'R$ {:,.2f}'`), `map`, `apply`, `hide`, `setCaption`, `setTableStyles`, `toHtml`, `toLatex` e `toExcel` com cores.
 
 ## Diferenças em relação ao pandas
 
-- **MultiIndex**: um groupby com várias chaves gera um índice de tuplas (`['SP', 'a']`). `resetIndex()` separa as tuplas em colunas. `agg` com lista de funções gera colunas achatadas (`preco_min`, `preco_max`).
-- **Agregações numéricas** (`sum`, `mean`, `std`, ...) no DataFrame e no GroupBy ignoram colunas não numéricas, como `numeric_only=True`.
-- Os nomes de coluna são sempre strings.
-- O fuso horário é sempre UTC.
+- **Rótulos de coluna únicos e em string.** Uma coluna MultiIndex é uma tupla de strings: `df.columnIndex` mostra as tuplas, e em `df.columns` as partes vêm unidas pelo caractere `\u001f`. Para nomes achatados como `preco_min`, use `flattenColumns()`.
+- **Sem eixo Y secundário nos gráficos.** É uma escolha de design: dois eixos com escalas diferentes enganam a leitura. Use `subplots`.
+- **Mais de 8 séries num gráfico gera erro**, em vez de repetir cores. Selecione colunas ou use `subplots`. Na pizza, o excesso vira "Other".
+- **`rolling(..., { winType }).std()/.var()`** usa os pesos acompanhando a janela. O pandas atribui os pesos por posição absoluta, o que é inconsistente com o próprio `mean` ponderado dele.
+- **I/O assíncrono**: Excel, Parquet, Feather, HDF5 e SQL retornam `Promise`, porque as bibliotecas que eles usam são assíncronas.
+- **HDF5**: a escrita usa só o formato `table`, ainda sem MultiIndex nas linhas. Categorias gravadas em Parquet são lidas pelo pandas como string.
+- Booleanos aparecem como `true`/`false` no `console.log`. Nas exportações (HTML, XML e CSV) aparecem como `True`/`False`, como no pandas.
 
 ## Desenvolvimento
 
@@ -112,10 +121,10 @@ npm run typecheck
 ```
 
 ```bash
-npm run build
+PANDAS_PYTHON=/caminho/para/venv/bin/python npm run parity
 ```
 
-Os testes rodam direto nos arquivos `.ts`, usando o type stripping nativo do Node e o `node:test`. O código fica em `src/`: `core/` tem a coluna tipada, o índice e os kernels de agregação, ordenação e formatação, e por cima vêm `series.ts`, `frame.ts`, `groupby.ts`, `reshape.ts` e `io/`.
+A paridade compara cada caso com o pandas real; ela precisa de um Python com pandas, scipy, pyarrow, tables, openpyxl e lxml. O script `parity/fixtures.py` regera os arquivos de `test/fixtures`.
 
 ## Licença
 

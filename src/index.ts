@@ -11,6 +11,9 @@ export { readXml, readXmlAsync, toXml, type ReadXmlOptions, type ToXmlOptions } 
 export { readExcel, toExcel, ExcelWriter, type ReadExcelOptions, type ToExcelOptions } from './io/excel.ts';
 export { readParquet, toParquet, readFeather, toFeather, fromArrow, toArrow, type ReadParquetOptions, type ToParquetOptions } from './io/columnar.ts';
 export { readHdf, toHdf, hdfKeys, type ToHdfOptions } from './io/hdf.ts';
+export { Styler, type Subset } from './style.ts';
+export { formatSpec, pyFormat } from './core/pyformat.ts';
+export { plotHtml, compact, type PlotOptions, type PlotKind, type PlotAccessor } from './plot.ts';
 export { readSql, readSqlQuery, readSqlTable, readSqlChunks, toSql, type SqlConnection, type SqlDialect, type ReadSqlOptions, type ToSqlOptions } from './io/sql.ts';
 export { readJson, readJsonAsync, toJson, type JsonOrient, type ReadJsonOptions } from './io/json.ts';
 export { Index, MultiIndex, Slice, slice } from './core/indexes.ts';
@@ -24,7 +27,7 @@ import { DataFrame as DF } from './frame.ts';
 export function melt(df: DF, options: Parameters<DF['melt']>[0] = {}): DF {
   return df.melt(options);
 }
-export { DISPLAY as options } from './core/format.ts';
+export { DISPLAY as options, setOption, getOption, resetOption, optionContext } from './core/format.ts';
 export { StringMethods, DatetimeMethods } from './accessors.ts';
 export type { DType, Label, AggName } from './core/types.ts';
 export { Timedelta, Period, type TimedeltaParts, type PeriodFreq } from './core/time.ts';

@@ -1,6 +1,6 @@
 import { aggregate, NUMERIC_AGGS, quantile, type AggOptions } from './core/aggregate.ts';
 import { Column } from './core/column.ts';
-import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
+import { DISPLAY, displayPositions, formatColumn, formatIndex, formatScalar, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
 import { correlation, covariance, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
@@ -12,6 +12,7 @@ import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from '.
 import type { Timedelta } from './core/time.ts';
 import type { DateOffset } from './core/offsets.ts';
 import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
+import { plotAccessor, type PlotAccessor } from './plot.ts';
 import { onAxis, pivot, stack, unstack, xs } from './levels.ts';
 import { pivotTable, type PivotTableOptions } from './pivot.ts';
 import { combineFirst, compare, explodeFrame, update } from './combine.ts';
@@ -26,6 +27,9 @@ import { toXml, type ToXmlOptions } from './io/xml.ts';
 import { toSql, type SqlConnection, type ToSqlOptions } from './io/sql.ts';
 import { toExcel, type ToExcelOptions } from './io/excel.ts';
 import { toFeather, toParquet, type ToParquetOptions } from './io/columnar.ts';
+import { exportCell, latexTable, Styler } from './style.ts';
+import { formatSpec, pyFormat } from './core/pyformat.ts';
+import { isNA } from './core/values.ts';
 import { toHdf, type ToHdfOptions } from './io/hdf.ts';
 import {
   dropMatchedLevels, duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, resolveRows, labelPositions, positionalPositions, samplePositions,
@@ -171,6 +175,15 @@ export class DataFrame {
   flattenColumns(sep = '_'): DataFrame {
     const cols = new Map([...this._cols].map(([k, c]) => [colTuple(k).filter((p) => p !== '').join(sep), c]));
     return DataFrame._fromColumns(cols, this.index);
+  }
+
+  /** @internal Column keys from names / tuples; a plain list that only names one MultiIndex column is that tuple. */
+  columnKeys(by: string | readonly (string | readonly string[])[]): string[] {
+    if (typeof by === 'string') return [by];
+    if (this.nColumnLevels > 1 && by.every((b) => typeof b === 'string') && by.length === this.nColumnLevels && !by.some((b) => this._cols.has(b as string)) && this._cols.has(colKey(by as string[]))) {
+      return [colKey(by as string[])];
+    }
+    return by.map((b) => (typeof b === 'string' ? b : colKey(b)));
   }
 
   /** Keys of the columns whose label starts with `prefix`. */
@@ -928,8 +941,9 @@ export class DataFrame {
 
   // ------------------------------------------------------------------ sorting
 
-  sortValues(by: string | readonly string[], options: { ascending?: boolean | readonly boolean[]; naPosition?: NaPosition } = {}): DataFrame {
-    const names = typeof by === 'string' ? [by] : by;
+  /** Sorts by column(s); a MultiIndex column is a tuple, e.g. `sortValues([['preco', 'min']])`. */
+  sortValues(by: string | readonly (string | readonly string[])[], options: { ascending?: boolean | readonly boolean[]; naPosition?: NaPosition } = {}): DataFrame {
+    const names = this.columnKeys(by);
     const asc = options.ascending ?? true;
     const keys = names.map((n, i) => sortKeyFromColumn(this._column(n), typeof asc === 'boolean' ? asc : asc[i] ?? true));
     return this.take(argsort(keys, this.length, options.naPosition));
@@ -1085,6 +1099,11 @@ export class DataFrame {
 
 
 
+  /** SVG charts: `plot({ kind })` or `plot.line()`, `plot.bar()`, `plot.hist()`, ... */
+  get plot(): PlotAccessor {
+    return plotAccessor(this);
+  }
+
   // ------------------------------------------------------------- MultiIndex
 
   /** Cross-section at `key` of an index level (or of the columns with `axis: 1`). */
@@ -1225,6 +1244,57 @@ export class DataFrame {
     return toJson(this, path, options);
   }
 
+
+  /** Bytes used per column (and the index), like `memory_usage`; `deep` counts string contents. */
+  memoryUsage(options: { index?: boolean; deep?: boolean } = {}): Series {
+    const names = this.columns;
+    const vals = names.map((n) => columnBytes(this._cols.get(n)!, options.deep ?? false));
+    if (options.index ?? true) return new Series([indexBytes(this.index, options.deep ?? false), ...vals], { index: ['Index', ...names], dtype: 'int64' });
+    return new Series(vals, { index: names, dtype: 'int64' });
+  }
+
+  /** Conditional formatting (Styler), like `df.style`. */
+  get style(): Styler {
+    return new Styler(this);
+  }
+
+  /** LaTeX tabular (booktabs), like `to_latex`. */
+  toLatex(options: { index?: boolean; header?: boolean; caption?: string; label?: string; position?: string; columnFormat?: string; naRep?: string; floatFormat?: string | ((v: number) => string) } = {}): string {
+    const names = this.columns;
+    const rows = Array.from({ length: this.length }, (_, i) => names.map((n) => {
+      const c = this._cols.get(n)!;
+      const v = c.get(i);
+      if (isNA(v) && options.naRep !== undefined) return options.naRep;
+      if (typeof v === 'number' && !isNA(v) && options.floatFormat && (c.dtype === 'float64' || c.dtype === 'Float64')) return typeof options.floatFormat === 'function' ? options.floatFormat(v) : pyFormat(options.floatFormat, v);
+      return exportCell(c, i, 'latex');
+    }));
+    const index = options.index === false ? null : this.index.labels.map((l) => (Array.isArray(l) ? l.join(' ') : formatScalar(l)));
+    return latexTable(index, options.header === false ? names.map(() => '') : names.map((n) => colTuple(n).join(' ')), rows, names.map((n) => isNumericDType(this._cols.get(n)!.dtype)), { ...options, hrules: true });
+  }
+
+  /** Markdown pipe table (tabulate style), like `to_markdown`. */
+  toMarkdown(options: { index?: boolean } = {}): string {
+    const names = this.columns;
+    const showIndex = options.index ?? true;
+    const columns: { header: string; cells: string[]; numeric: boolean }[] = [];
+    if (showIndex) {
+      const labels = this.index.labels;
+      columns.push({ header: this.index.name ?? '', cells: labels.map((l) => (typeof l === 'number' ? formatSpec(l, 'g') : formatScalar(l))), numeric: labels.every((l) => typeof l === 'number') });
+    }
+    for (const n of names) {
+      const c = this._cols.get(n)!;
+      const numeric = isNumericDType(c.dtype) && c.dtype !== 'bool';
+      const cells = Array.from({ length: this.length }, (_, i) => {
+        const v = c.get(i);
+        if (isNA(v)) return 'nan';
+        if (typeof v === 'number') return formatSpec(v, 'g');
+        return typeof v === 'boolean' ? (v ? 'True' : 'False') : formatScalar(v);
+      });
+      columns.push({ header: colTuple(n).join(' '), cells, numeric });
+    }
+    return pipeTable(columns);
+  }
+
   /** HTML table markup (pandas-compatible); writes to `path` when given. */
   toHtml(path?: string, options: ToHtmlOptions = {}): string {
     return toHtml(this, path, options);
@@ -1272,37 +1342,66 @@ export class DataFrame {
     const counts = new Map<string, number>();
     for (const c of this._cols.values()) counts.set(c.dtype, (counts.get(c.dtype) ?? 0) + 1);
     lines.push('dtypes: ' + [...counts].map(([d, n]) => `${d}(${n})`).join(', '));
+    const bytes = (this.memoryUsage().sum() as number);
+    const hasObjects = [...this._cols.values()].some((c) => c.dtype === 'string' || c.dtype === 'object');
+    lines.push(`memory usage: ${humanBytes(bytes)}${hasObjects ? '+' : ''}`);
     return lines.join('\n');
   }
 
-  toString(): string {
-    const [nrows, ncols] = this.shape;
+  /**
+   * Text rendering (what `console.log(df)` shows). Options override the global
+   * display options for this call.
+   */
+  toString(options: { maxRows?: number; maxCols?: number; index?: boolean; header?: boolean; naRep?: string; lineWidth?: number; showDimensions?: boolean | 'truncate'; columns?: readonly string[] } = {}): string {
+    const frame = options.columns ? this.get(options.columns) : this;
+    const [nrows, ncols] = frame.shape;
     if (ncols === 0 || nrows === 0) {
-      return `Empty DataFrame\nColumns: [${this.columns.join(', ')}]\nIndex: [${this.index.labels.map(String).join(', ')}]`;
+      return `Empty DataFrame\nColumns: [${frame.columns.join(', ')}]\nIndex: [${frame.index.labels.map(String).join(', ')}]`;
     }
-    const rowPos = displayPositions(nrows, DISPLAY.maxRows, DISPLAY.minRows);
-    const colPos = displayPositions(ncols, DISPLAY.maxColumns, DISPLAY.maxColumns);
-    const names = this.columns;
-    const levels = this.nColumnLevels;
-    const idx = formatIndex(this.index, rowPos);
-    // One header row per column level (sparsified like pandas), then the index names.
+    const maxRows = options.maxRows ?? DISPLAY.maxRows;
+    const maxCols = options.maxCols ?? DISPLAY.maxColumns;
+    const width = options.lineWidth ?? DISPLAY.width;
+    const rowPos = displayPositions(nrows, maxRows || Infinity, Math.min(DISPLAY.minRows, maxRows || Infinity));
+    const names = frame.columns;
+    const levels = frame.nColumnLevels;
+    const showIndex = options.index ?? true;
+    const idx = showIndex ? formatIndex(frame.index, rowPos) : [];
+    const cellCols = names.map((n) => formatColumn(frame._cols.get(n)!, rowPos).map((v) => (options.naRep !== undefined && (v === 'NaN' || v === 'null' || v === '<NA>') ? options.naRep : v)));
+    const headerOf = (j: number) => (levels > 1 ? colTuple(names[j]) : [names[j]]);
+    const colWidth = (j: number) => Math.max(...headerOf(j).map((h) => h.length), ...cellCols[j].map((c) => c.length));
+    // Hide middle columns when there are too many, or when the table is wider than the line width.
+    let colPos = displayPositions(ncols, maxCols || Infinity, maxCols || Infinity);
+    const idxWidth = idx.reduce((w, c) => w + Math.max(...c.map((x) => x.length)) + 2, 0);
+    const tableWidth = (pos: (number | null)[]) => idxWidth + pos.reduce((w: number, j) => w + (j === null ? 3 : colWidth(j)) + 2, 0);
+    if (width && tableWidth(colPos) > width && ncols > 1) {
+      let keep = Math.min(ncols, colPos.filter((j) => j !== null).length);
+      while (keep > 2) {
+        keep -= 1;
+        const half = Math.ceil(keep / 2);
+        const cand = [...Array.from({ length: half }, (_, k) => k), null, ...Array.from({ length: keep - half }, (_, k) => ncols - (keep - half) + k)];
+        colPos = cand;
+        if (tableWidth(cand) <= width) break;
+      }
+    }
     const headers: string[][] = Array.from({ length: levels }, (_, l) => idx.map((_, k) => (k === idx.length - 1 ? (levels > 1 ? (this._colNames?.[l] ?? '') : (this._colNames?.[0] ?? '')) : '')));
-    const indexNames: string[] = this.index.nlevels > 1 ? this.index.names!.map((n) => n ?? '') : [this.index.name ?? ''];
+    const indexNames: string[] = showIndex ? (frame.index.nlevels > 1 ? frame.index.names!.map((n) => n ?? '') : [frame.index.name ?? '']) : [];
     const body: string[][] = [...idx];
     let prev: string[] | null = null;
     for (const j of colPos) {
       if (j === null) { headers.forEach((h) => h.push('...')); indexNames.push(''); body.push(rowPos.map(() => '...')); prev = null; continue; }
-      const tuple = levels > 1 ? colTuple(names[j]) : [names[j]];
+      const tuple = headerOf(j);
       tuple.forEach((part, l) => {
         const same = prev !== null && l < levels - 1 && tuple.slice(0, l + 1).every((p, k) => p === prev![k]);
         headers[l].push(same ? '' : part);
       });
       prev = tuple;
       indexNames.push('');
-      body.push(formatColumn(this._cols.get(names[j])!, rowPos));
+      body.push(cellCols[j]);
     }
-    let out = renderTable([...headers, indexNames], body, idx.length);
-    if (nrows > DISPLAY.maxRows || ncols > DISPLAY.maxColumns) out += `\n\n[${nrows} rows x ${ncols} columns]`;
+    let out = renderTable(options.header === false ? [] : [...headers, indexNames], body, idx.length);
+    const truncated = nrows > rowPos.filter((p) => p !== null).length || colPos.includes(null);
+    const dims = options.showDimensions ?? DISPLAY.showDimensions;
+    if (dims === true || (dims === 'truncate' && truncated)) out += `\n\n[${nrows} rows x ${ncols} columns]`;
     return out;
   }
 
@@ -1312,6 +1411,46 @@ export class DataFrame {
 }
 
 // ----------------------------------------------------------------- helpers
+
+function humanBytes(n: number): string {
+  for (const unit of ['bytes', 'KB', 'MB', 'GB']) {
+    if (n < 1024 || unit === 'GB') return unit === 'bytes' ? `${n}.0 bytes` : `${n.toFixed(1)} ${unit}`;
+    n /= 1024;
+  }
+  return `${n} TB`;
+}
+
+/** Bytes of one column (typed storage exactly; object references as 8 bytes, plus contents when deep). */
+export function columnBytes(c: Column, deep: boolean): number {
+  if (c.data instanceof Float64Array || c.data instanceof Uint8Array || c.data instanceof Int32Array) {
+    let n = c.data.byteLength;
+    if (c.dtype === 'category') n += c.meta.categories!.length * 8 + (deep ? c.meta.categories!.reduce((s: number, v) => s + (typeof v === 'string' ? 49 + Buffer.byteLength(v) : 0), 0) : 0);
+    return n;
+  }
+  let n = c.length * 8;
+  if (deep) for (const v of c.data as unknown[]) if (typeof v === 'string') n += 49 + Buffer.byteLength(v);
+  return n;
+}
+
+function indexBytes(index: Index, deep: boolean): number {
+  if (index.isDefault) return 132;
+  return columnBytes(Column.from(index.labels.map((l) => (Array.isArray(l) ? l.join(',') : l))), deep);
+}
+
+/** Markdown pipe table in tabulate's layout (decimal-aligned numbers). */
+function pipeTable(columns: { header: string; cells: string[]; numeric: boolean }[]): string {
+  const aligned = columns.map((col) => {
+    if (!col.numeric) return col.cells;
+    const dec = Math.max(0, ...col.cells.map((s) => (s.includes('.') ? s.length - s.indexOf('.') - 1 : 0)));
+    return col.cells.map((s) => (s.includes('.') ? s + ' '.repeat(dec - (s.length - s.indexOf('.') - 1)) : s + ' '.repeat(dec ? dec + 1 : 0)));
+  });
+  const widths = columns.map((col, j) => Math.max(col.header.length + 2, ...aligned[j].map((s) => s.length)));
+  const pad = (s: string, j: number) => (columns[j].numeric ? s.padStart(widths[j]) : s.padEnd(widths[j]));
+  const lines = ['| ' + columns.map((c, j) => pad(c.header, j)).join(' | ') + ' |'];
+  lines.push('|' + columns.map((c, j) => (c.numeric ? '-'.repeat(widths[j] + 1) + ':' : ':' + '-'.repeat(widths[j] + 1))).join('|') + '|');
+  for (let i = 0; i < (aligned[0]?.length ?? 0); i++) lines.push('| ' + aligned.map((col, j) => pad(col[i], j)).join(' | ') + ' |');
+  return lines.join('\n');
+}
 
 /** Column labels are keys of a Map, so duplicates would silently drop data. */
 function assertUniqueColumns(keys: readonly string[]): void {
