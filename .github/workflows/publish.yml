@@ -1,0 +1,58 @@
+name: Publish to npm
+
+# Run manually from the Actions tab ("Run workflow").
+# Publishes the version in package.json and fails if that version is already on npm.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Read package name and version
+        id: pkg
+        run: |
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if the version is already published
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          # npm view exits non-zero with E404 when the package or version does not exist.
+          if published=$(npm view "$NAME@$VERSION" version 2>/dev/null) && [ "$published" = "$VERSION" ]; then
+            echo "::error title=Version already published::$NAME@$VERSION already exists on npm. Bump \"version\" in package.json and try again."
+            exit 1
+          fi
+          echo "$NAME@$VERSION is not on npm yet; continuing."
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Checks already ran above, so skip prepublishOnly.
+        run: npm publish --provenance --access public --ignore-scripts
+
+      - name: Summary
+        run: echo "Published ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }} → https://www.npmjs.com/package/${{ steps.pkg.outputs.name }}" >> "$GITHUB_STEP_SUMMARY"
