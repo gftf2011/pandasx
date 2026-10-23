@@ -3,12 +3,13 @@ import { Column } from './core/column.ts';
 import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
+import { correlation, covariance, interpolate, rankPositions, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
 import { isNumericDType, isNumericStorage, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
 import { normalizeFreq, parseDate, parsePeriodString, parseTimedelta, Period, periodOrdinal, Timedelta } from './core/time.ts';
 import { compareValues, hashKey, isNA, valuesEqual } from './core/values.ts';
 import { CategoricalMethods, DatetimeMethods, StringMethods } from './accessors.ts';
 import { DataFrame } from './frame.ts';
-import { SeriesGroupBy, type GroupByOptions } from './groupby.ts';
+import { resolveGroupKeys, SeriesGroupBy, type GroupByOptions, type GroupKey } from './groupby.ts';
 
 export class KeyError extends Error {
   constructor(key: unknown) {
@@ -607,20 +608,24 @@ export class Series {
     return this.take(pos);
   }
 
-  /** Linear interpolation of missing numeric values. */
-  interpolate(): Series {
-    if (!isNumericDType(this.dtype)) throw new TypeError('interpolate requires numeric dtype');
-    const src = this._col.data as ArrayLike<number>;
-    const out = Float64Array.from(src);
-    let prev = -1;
-    for (let i = 0; i < out.length; i++) {
-      if (Number.isNaN(out[i])) continue;
-      if (prev >= 0 && i - prev > 1) {
-        for (let j = prev + 1; j < i; j++) out[j] = out[prev] + ((out[i] - out[prev]) * (j - prev)) / (i - prev);
-      }
-      prev = i;
-    }
-    return this.with(new Column('float64', out));
+  /**
+   * Fills NaN by interpolation. Methods: linear (default), time, index/values,
+   * nearest, zero/pad/ffill, bfill, quadratic, cubic, spline, polynomial, pchip, akima.
+   */
+  interpolate(options: InterpolateOptions = {}): Series {
+    const y = numericView(this._col, 'interpolate');
+    const method = options.method ?? 'linear';
+    let x: ArrayLike<number>;
+    if (method === 'time') {
+      x = this.index.labels.map((l) => {
+        if (!(l instanceof Date)) throw new TypeError("interpolate(method='time') requires a datetime index");
+        return l.getTime();
+      });
+    } else if (method === 'index' || method === 'values') {
+      x = this.index.labels.map((l) => (l instanceof Date ? l.getTime() : Number(l)));
+    } else x = Float64Array.from({ length: this.length }, (_, i) => i);
+    const out = interpolate(y, x, options);
+    return this.with(new Column(this.dtype === 'Float64' || this.dtype === 'Int64' ? 'Float64' : 'float64', out));
   }
 
   // ------------------------------------------------------------------ sorting
@@ -648,20 +653,29 @@ export class Series {
     return this.dropna().sortValues({ ascending: true }).head(n);
   }
 
-  /** Ranks (1-based, average for ties), like `rank(method='average')`. */
-  rank(options: { ascending?: boolean } = {}): Series {
-    const order = argsort([sortKeyFromColumn(this._col, options.ascending ?? true)], this.length);
-    const out = new Float64Array(this.length).fill(NaN);
-    let i = 0;
-    while (i < order.length) {
-      if (this._col.isNA(order[i])) { i++; continue; }
-      let j = i;
-      while (j + 1 < order.length && !this._col.isNA(order[j + 1]) && valuesEqual(this._col.get(order[j + 1]), this._col.get(order[i]))) j++;
-      const r = (i + j) / 2 + 1;
-      for (let k = i; k <= j; k++) out[order[k]] = r;
-      i = j + 1;
-    }
+  /** Ranks (1-based); `method`: average (default), min, max, first, dense. */
+  rank(options: RankOptions = {}): Series {
+    const col = this._col;
+    const raw = (i: number) => col.raw(i);
+    const out = rankPositions(this.length, (i) => col.isNA(i), (a, b) => compareValues(raw(a), raw(b)), options);
     return this.with(new Column('float64', out));
+  }
+
+  /** Correlation with another Series (aligned on the index). */
+  corr(other: Series, options: { method?: CorrMethod; minPeriods?: number } = {}): number {
+    const { left, right } = this._align(other);
+    return correlation(numericView(left), numericView(right!), options.method, options.minPeriods);
+  }
+
+  /** Sample covariance with another Series (aligned on the index). */
+  cov(other: Series, options: { minPeriods?: number; ddof?: number } = {}): number {
+    const { left, right } = this._align(other);
+    return covariance(numericView(left), numericView(right!), options.minPeriods, options.ddof);
+  }
+
+  /** Correlation of the series with itself shifted by `lag`. */
+  autocorr(lag = 1): number {
+    return this.corr(this.shift(lag));
   }
 
   // ---------------------------------------------------------------- duplicates
@@ -900,20 +914,13 @@ export class Series {
     return this.toFrame(options.name ?? this.name ?? '0').resetIndex();
   }
 
-  groupby(by: Series | readonly unknown[] | readonly (Series | readonly unknown[])[], options: GroupByOptions = {}): SeriesGroupBy {
-    const list = Array.isArray(by) && (by[0] instanceof Series || Array.isArray(by[0])) ? (by as (Series | unknown[])[]) : [by as Series | unknown[]];
-    const cols = new Map<string, Column>();
-    const keyNames: (string | null)[] = [];
-    list.forEach((k, i) => {
-      const col = k instanceof Series ? (k.index.equals(this.index) ? k._col : k.reindex(this.index)._col) : Column.from(k);
-      if (col.length !== this.length) throw new RangeError('Grouper length must match the series length');
-      cols.set(`\u0000key${i}`, col);
-      keyNames.push(k instanceof Series ? k.name : null);
-    });
-    cols.set('\u0000value', this._col);
-    const frame = DataFrame._fromColumns(cols, this.index);
-    return new SeriesGroupBy(frame, [...cols.keys()].slice(0, -1), '\u0000value', options, keyNames, this.name);
+  /** Groups values by Series, arrays of keys, functions of the index label, and/or index levels. */
+  groupby(by: GroupKey | readonly GroupKey[] | null, options: GroupByOptions = {}): SeriesGroupBy {
+    const base = DataFrame._fromColumns(new Map([['\u0000value', this._col]]), this.index);
+    const r = resolveGroupKeys(base, by, options.level);
+    return new SeriesGroupBy(r.frame, r.by, '\u0000value', options, r.names, this.name);
   }
+
 
   // ------------------------------------------------------------------ display
 

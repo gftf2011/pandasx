@@ -5,9 +5,15 @@ import { isNumericDType, NULLABLE_DTYPES, type AggName, type DType, type Label }
 import { compareValues, hashKey, isNA } from './core/values.ts';
 import { DataFrame } from './frame.ts';
 import { concat } from './reshape.ts';
-import { Series } from './series.ts';
+import { samplePositions, Series } from './series.ts';
+import type { RankOptions } from './core/stats.ts';
+
+/** A grouping key: column name, Series (aligned on the index), array of keys, or function of the index label. */
+export type GroupKey = string | Series | readonly unknown[] | ((label: Label) => unknown);
 
 export interface GroupByOptions {
+  /** Group by index level(s) (number or name) instead of / in addition to `by`. */
+  level?: number | string | readonly (number | string)[];
   /** Sort group keys (default true). */
   sort?: boolean;
   /** Exclude groups whose key contains NA (default true). */
@@ -80,7 +86,7 @@ abstract class BaseGroupBy {
   readonly _by: readonly string[];
   /** @internal Display names of the keys. */
   readonly _keyNames: readonly (string | null)[];
-  protected readonly options: Required<GroupByOptions>;
+  protected readonly options: Required<Omit<GroupByOptions, 'level'>>;
   private cache: Groups | null = null;
 
   constructor(frame: DataFrame, by: readonly string[], options: GroupByOptions, keyNames?: readonly (string | null)[]) {
@@ -98,6 +104,58 @@ abstract class BaseGroupBy {
 
   get ngroups(): number {
     return this._groups.keys.length;
+  }
+
+  private publicCache: DataFrame | null = null;
+
+  /** @internal The frame without hidden key columns (added for non-column keys). */
+  get _public(): DataFrame {
+    if (!this.publicCache) {
+      const hidden = this._frame.columns.filter((c) => c.startsWith('\u0000'));
+      this.publicCache = hidden.length ? this._frame.drop(hidden) : this._frame;
+    }
+    return this.publicCache;
+  }
+
+  /** Group label → index labels of its rows (pandas `.groups`). */
+  get groups(): Map<Label, Label[]> {
+    const g = this._groups;
+    return new Map(g.keys.map((k, i) => [this.label(k), g.rows[i].map((p) => this._frame.index.labels[p])]));
+  }
+
+  /** Group number of each row (NaN for rows whose key was dropped). */
+  ngroup(options: { ascending?: boolean } = {}): Series {
+    const out = new Float64Array(this._frame.length).fill(NaN);
+    const n = this.ngroups;
+    this._groups.rows.forEach((rows, g) => { for (const p of rows) out[p] = options.ascending === false ? n - 1 - g : g; });
+    return Series._from(Column.from(Array.from(out)), this._frame.index, null);
+  }
+
+  /** 0-based position of each row within its group. */
+  cumcount(options: { ascending?: boolean } = {}): Series {
+    const out = new Float64Array(this._frame.length).fill(NaN);
+    for (const rows of this._groups.rows) rows.forEach((p, k) => (out[p] = options.ascending === false ? rows.length - 1 - k : k));
+    return Series._from(Column.from(Array.from(out)), this._frame.index, null);
+  }
+
+  /** Calls `fn(this)`, for method chaining. */
+  pipe<T>(fn: (g: this) => T): T {
+    return fn(this);
+  }
+
+  /** @internal Positions of the n-th row(s) of each group (negative counts from the end). */
+  _nthPositions(n: number | readonly number[]): number[] {
+    const ns = typeof n === 'number' ? [n] : n;
+    return this.positionsWhere((rows) => {
+      const out: number[] = [];
+      for (const k of ns) { const q = k < 0 ? rows.length + k : k; if (q >= 0 && q < rows.length) out.push(rows[q]); }
+      return out;
+    });
+  }
+
+  /** @internal Random rows per group. */
+  _samplePositions(n: number, seed?: number): number[] {
+    return this.positionsWhere((rows, g) => samplePositions(rows.length, n, seed === undefined ? undefined : seed + g).map((k) => rows[k]));
   }
 
   /** Group label → row positions. */
@@ -150,13 +208,13 @@ abstract class BaseGroupBy {
 export class DataFrameGroupBy extends BaseGroupBy {
   private readonly selection: readonly string[] | null;
 
-  constructor(frame: DataFrame, by: readonly string[], options: GroupByOptions = {}, selection: readonly string[] | null = null) {
-    super(frame, by, options);
+  constructor(frame: DataFrame, by: readonly string[], options: GroupByOptions = {}, selection: readonly string[] | null = null, keyNames?: readonly (string | null)[]) {
+    super(frame, by, options, keyNames);
     this.selection = selection;
   }
 
   private valueColumns(): string[] {
-    return this.selection ? [...this.selection] : this._frame.columns.filter((c) => !this._by.includes(c));
+    return this.selection ? [...this.selection] : this._frame.columns.filter((c) => !this._by.includes(c) && !c.startsWith('\u0000'));
   }
 
   /** `groupby(...).get('col')` ≈ `groupby(...)['col']`. */
@@ -167,7 +225,7 @@ export class DataFrameGroupBy extends BaseGroupBy {
       this._frame._column(key);
       return new SeriesGroupBy(this._frame, this._by, key, this.options, this._keyNames, key);
     }
-    return new DataFrameGroupBy(this._frame, this._by, this.options, key);
+    return new DataFrameGroupBy(this._frame, this._by, this.options, key, this._keyNames);
   }
 
   /** Rows per group. */
@@ -244,7 +302,7 @@ export class DataFrameGroupBy extends BaseGroupBy {
    */
   apply(fn: (group: DataFrame, key: Label) => unknown): Series | DataFrame {
     const g = this._groups;
-    const results = g.rows.map((r, i) => fn(this._frame.take(r), this.label(g.keys[i])));
+    const results = g.rows.map((r, i) => fn(this._public.take(r), this.label(g.keys[i])));
     const index = this._keyIndex();
     if (results.every((r) => r instanceof DataFrame)) {
       const frames = (results as DataFrame[]).map((df, i) => {
@@ -274,16 +332,78 @@ export class DataFrameGroupBy extends BaseGroupBy {
   /** Rows of the groups for which `fn(group)` is true. */
   filter(fn: (group: DataFrame, key: Label) => boolean): DataFrame {
     const g = this._groups;
-    return this._frame.take(this.positionsWhere((rows, i) => (fn(this._frame.take(rows), this.label(g.keys[i])) ? rows : [])));
+    return this._public.take(this.positionsWhere((rows, i) => (fn(this._public.take(rows), this.label(g.keys[i])) ? rows : [])));
   }
 
   /** First `n` rows of each group, in original order. */
   head(n = 5): DataFrame {
-    return this._frame.take(this.positionsWhere((rows) => rows.slice(0, n)));
+    return this._public.take(this.positionsWhere((rows) => rows.slice(0, n)));
   }
 
   tail(n = 5): DataFrame {
-    return this._frame.take(this.positionsWhere((rows) => rows.slice(Math.max(0, rows.length - n))));
+    return this._public.take(this.positionsWhere((rows) => rows.slice(Math.max(0, rows.length - n))));
+  }
+
+  /** Applies a per-group Series transform to every value column. */
+  private eachColumn(fn: (g: SeriesGroupBy) => Series, numericOnly = false): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const name of this.valueColumns()) {
+      const col = this._frame._column(name);
+      if (numericOnly && !isNumericDType(col.dtype)) continue;
+      cols.set(name, fn(this.get(name))._col);
+    }
+    return DataFrame._fromColumns(cols, this._frame.index);
+  }
+
+  /** Per-column per-group aggregation with a Series → scalar function. */
+  private aggEach(fn: (s: Series) => unknown, numericOnly = true): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const name of this.valueColumns()) {
+      const col = this._frame._column(name);
+      if (numericOnly && !isNumericDType(col.dtype)) continue;
+      cols.set(name, this._aggColumn(col, fn, name));
+    }
+    return this._wrap(cols);
+  }
+
+  sem(): DataFrame { return this.reduce('sem'); }
+  any(): DataFrame { return this.reduce('any'); }
+  all(): DataFrame { return this.reduce('all'); }
+  shift(periods = 1): DataFrame { return this.eachColumn((g) => g.shift(periods)); }
+  diff(periods = 1): DataFrame { return this.eachColumn((g) => g.diff(periods), true); }
+  pctChange(periods = 1): DataFrame { return this.eachColumn((g) => g.pctChange(periods), true); }
+  rank(options: RankOptions = {}): DataFrame { return this.eachColumn((g) => g.rank(options)); }
+  cumsum(): DataFrame { return this.eachColumn((g) => g.cumsum(), true); }
+  cumprod(): DataFrame { return this.eachColumn((g) => g.cumprod(), true); }
+  cummax(): DataFrame { return this.eachColumn((g) => g.cummax(), true); }
+  cummin(): DataFrame { return this.eachColumn((g) => g.cummin(), true); }
+  ffill(limit?: number): DataFrame { return this.eachColumn((g) => g.ffill(limit)); }
+  bfill(limit?: number): DataFrame { return this.eachColumn((g) => g.bfill(limit)); }
+  fillna(value: unknown): DataFrame { return this.eachColumn((g) => g.transform((s) => s.fillna(value))); }
+
+  quantile(q = 0.5): DataFrame { return this.aggEach((s) => s.quantile(q)); }
+  idxmax(): DataFrame { return this.aggEach((s) => s.idxmax()); }
+  idxmin(): DataFrame { return this.aggEach((s) => s.idxmin()); }
+
+  /** n-th row(s) of each group (negative counts from the end), keeping the original index. */
+  nth(n: number | readonly number[]): DataFrame {
+    return this._public.take(this._nthPositions(n));
+  }
+
+  /** `n` random rows per group. */
+  sample(n = 1, options: { seed?: number } = {}): DataFrame {
+    return this._public.take(this._samplePositions(n, options.seed));
+  }
+
+  /** Summary statistics per group, one `column_stat` column per statistic. */
+  describe(): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const name of this.valueColumns()) {
+      if (!isNumericDType(this._frame._column(name).dtype)) continue;
+      const d = this.get(name).describe();
+      for (const stat of d.columns) cols.set(`${name}_${stat}`, d._column(stat));
+    }
+    return DataFrame._fromColumns(cols, this.options.asIndex ? this._keyIndex() : Index.range(this.ngroups));
   }
 
   getGroup(key: Label): DataFrame {
@@ -291,12 +411,12 @@ export class DataFrameGroupBy extends BaseGroupBy {
     const g = this._groups;
     const i = g.keys.findIndex((k) => hashKey(this.label(k)) === h);
     if (i < 0) throw new Error(`Group not found: ${String(key)}`);
-    return this._frame.take(g.rows[i]);
+    return this._public.take(g.rows[i]);
   }
 
   *[Symbol.iterator](): IterableIterator<[Label, DataFrame]> {
     const g = this._groups;
-    for (let i = 0; i < g.keys.length; i++) yield [this.label(g.keys[i]), this._frame.take(g.rows[i])];
+    for (let i = 0; i < g.keys.length; i++) yield [this.label(g.keys[i]), this._public.take(g.rows[i])];
   }
 }
 
@@ -398,16 +518,54 @@ export class SeriesGroupBy extends BaseGroupBy {
     return Series._from(col.take(pos), this._frame.index.take(pos), this.resultName);
   }
 
-  /** Cumulative sum within each group. */
-  cumsum(): Series {
-    return this.transform((s) => s.cumsum());
+  sem(): Series { return this.reduce('sem'); }
+  any(): Series { return this.reduce('any'); }
+  all(): Series { return this.reduce('all'); }
+  cumsum(): Series { return this.transform((s) => s.cumsum()); }
+  cumprod(): Series { return this.transform((s) => s.cumprod()); }
+  cummax(): Series { return this.transform((s) => s.cummax()); }
+  cummin(): Series { return this.transform((s) => s.cummin()); }
+  shift(periods = 1): Series { return this.transform((s) => s.shift(periods)); }
+  diff(periods = 1): Series { return this.transform((s) => s.diff(periods)); }
+  pctChange(periods = 1): Series { return this.transform((s) => s.pctChange(periods)); }
+  rank(options: RankOptions = {}): Series { return this.transform((s) => s.rank(options)); }
+  ffill(limit?: number): Series { return this.transform((s) => s.ffill(limit)); }
+  bfill(limit?: number): Series { return this.transform((s) => s.bfill(limit)); }
+  fillna(value: unknown): Series { return this.transform((s) => s.fillna(value)); }
+
+  quantile(q = 0.5): Series { return this.reduce((s) => s.quantile(q)); }
+  idxmax(): Series { return this.reduce((s) => s.idxmax()); }
+  idxmin(): Series { return this.reduce((s) => s.idxmin()); }
+
+  /** n-th value(s) of each group, keeping the original index. */
+  nth(n: number | readonly number[]): Series {
+    const pos = this._nthPositions(n);
+    return Series._from(this.col().take(pos), this._frame.index.take(pos), this.resultName);
   }
 
-  /** 0-based position of each row within its group. */
-  cumcount(): Series {
-    const out = new Float64Array(this._frame.length).fill(NaN);
-    for (const rows of this._groups.rows) rows.forEach((p, k) => (out[p] = k));
-    return Series._from(Column.from(Array.from(out), undefined), this._frame.index, null);
+  sample(n = 1, options: { seed?: number } = {}): Series {
+    const pos = this._samplePositions(n, options.seed);
+    return Series._from(this.col().take(pos), this._frame.index.take(pos), this.resultName);
+  }
+
+  /** count/mean/std/min/25%/50%/75%/max per group. */
+  describe(): DataFrame {
+    const stats: [string, (s: Series) => unknown][] = [
+      ['count', (s) => s.count()], ['mean', (s) => s.mean()], ['std', (s) => s.std()], ['min', (s) => s.min()],
+      ['25%', (s) => s.quantile(0.25)], ['50%', (s) => s.quantile(0.5)], ['75%', (s) => s.quantile(0.75)], ['max', (s) => s.max()],
+    ];
+    const cols = new Map<string, Column>();
+    for (const [name, f] of stats) cols.set(name, this._aggColumn(this.col(), f, this.column).astype('float64'));
+    return DataFrame._fromColumns(cols, this.options.asIndex ? this._keyIndex() : Index.range(this.ngroups));
+  }
+
+  /** open/high/low/close per group. */
+  ohlc(): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const [name, agg] of [['open', 'first'], ['high', 'max'], ['low', 'min'], ['close', 'last']] as const) {
+      cols.set(name, this._aggColumn(this.col(), agg, this.column));
+    }
+    return this._wrap(cols);
   }
 
   valueCounts(): Series {
@@ -430,4 +588,49 @@ export class SeriesGroupBy extends BaseGroupBy {
       yield [this.label(g.keys[i]), Series._from(col.take(r), this._frame.index.take(r), this.resultName)];
     }
   }
+}
+
+/**
+ * Resolves grouping keys to columns of a frame. Non-column keys become hidden
+ * columns (named with a leading NUL) so the GroupBy machinery stays uniform.
+ */
+export function resolveGroupKeys(
+  frame: DataFrame,
+  by: GroupKey | readonly GroupKey[] | null | undefined,
+  level: GroupByOptions['level'],
+): { frame: DataFrame; by: string[]; names: (string | null)[] } {
+  let keys: GroupKey[] = [];
+  if (by !== null && by !== undefined) {
+    if (typeof by === 'string' || by instanceof Series || typeof by === 'function') keys = [by];
+    else if ((by as readonly unknown[]).every((k) => (typeof k === 'string' && frame.has(k)) || k instanceof Series || typeof k === 'function' || Array.isArray(k))) {
+      keys = [...(by as readonly GroupKey[])];
+    } else keys = [by as readonly unknown[]];
+  }
+  const hidden = new Map<string, Column>();
+  const outBy: string[] = [];
+  const names: (string | null)[] = [];
+  const addHidden = (col: Column, name: string | null) => {
+    if (col.length !== frame.length) throw new RangeError(`Grouper length ${col.length} does not match ${frame.length} rows`);
+    const key = `\u0000key${hidden.size}`;
+    hidden.set(key, col);
+    outBy.push(key);
+    names.push(name);
+  };
+  const levels = level === undefined ? [] : Array.isArray(level) ? level : [level as number | string];
+  for (const l of levels) {
+    const idx = frame.index;
+    const pos = typeof l === 'number' ? l : idx.nlevels > 1 ? idx.names!.indexOf(l) : idx.name === l ? 0 : -1;
+    if (pos < 0 || pos >= idx.nlevels) throw new Error(`Level ${String(l)} not found`);
+    const vals = idx.nlevels > 1 ? idx.labels.map((t) => (t as readonly Label[])[pos]) : idx.labels;
+    addHidden(Column.from(vals), idx.nlevels > 1 ? idx.names![pos] : idx.name);
+  }
+  for (const k of keys) {
+    if (typeof k === 'string') { frame._column(k); outBy.push(k); names.push(k); }
+    else if (k instanceof Series) addHidden(k.index.equals(frame.index) ? k._col : k.reindex(frame.index)._col, k.name);
+    else if (typeof k === 'function') addHidden(Column.from(frame.index.labels.map((l) => k(l))), null);
+    else addHidden(Column.from(k), null);
+  }
+  if (outBy.length === 0) throw new Error('You have to supply one of `by` and `level`');
+  const out = hidden.size ? DataFrame._fromColumns(new Map([...frame._cols, ...hidden]), frame.index) : frame;
+  return { frame: out, by: outBy, names };
 }

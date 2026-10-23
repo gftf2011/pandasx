@@ -10,6 +10,9 @@ export { StringMethods, DatetimeMethods } from './accessors.ts';
 export type { DType, Label, AggName } from './core/types.ts';
 export { Timedelta, Period, type TimedeltaParts, type PeriodFreq } from './core/time.ts';
 export { CategoricalMethods } from './accessors.ts';
+export { evaluate as eval, evaluate, parseExpression } from './expr.ts';
+export type { GroupKey } from './groupby.ts';
+export type { RankOptions, RankMethod, CorrMethod, InterpolateOptions, InterpolateMethod } from './core/stats.ts';
 import { Series as SeriesClass } from './series.ts';
 
 /** pandas' `pd.NA`: missing values of nullable dtypes read back as `null`. */

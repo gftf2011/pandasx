@@ -3,14 +3,16 @@ import { Column } from './core/column.ts';
 import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
+import { correlation, covariance, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
 import { isNumericDType, type AggName, type DType, type Label } from './core/types.ts';
 import { compareValues, hashKey } from './core/values.ts';
-import { DataFrameGroupBy, type GroupByOptions } from './groupby.ts';
+import { DataFrameGroupBy, resolveGroupKeys, type GroupByOptions, type GroupKey } from './groupby.ts';
 import { merge, type MergeOptions } from './reshape.ts';
+import { evaluateStatements } from './expr.ts';
 import { toCsv, type ToCsvOptions } from './io/csv.ts';
 import { toJson, type JsonOrient } from './io/json.ts';
 import {
-  duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, labelPositions, positionalPositions, samplePositions,
+  duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, labelPositions, positionalPositions, samplePositions,
   Series, toIndex, type Mask, type Operand, type RowSelector,
 } from './series.ts';
 
@@ -399,15 +401,33 @@ export class DataFrame {
     return this.take(samplePositions(this.length, k, options.seed));
   }
 
-  /** Rows for which `predicate(row, label)` is true (a callback stand-in for `DataFrame.query`). */
-  query(predicate: (row: Record<string, unknown>, label: Label) => boolean): DataFrame {
+  /**
+   * Filters rows with a pandas-style expression (`'age > 30 and city == "SP"'`,
+   * `@var` for `locals`) or a predicate `(row, label) => boolean`.
+   */
+  query(expr: string | ((row: Record<string, unknown>, label: Label) => boolean), options: { locals?: Record<string, unknown> } = {}): DataFrame {
+    if (typeof expr === 'string') {
+      const mask = evaluateStatements(expr, { frame: this, locals: options.locals }).value;
+      if (!(mask instanceof Series)) throw new TypeError('query expression must evaluate to a boolean Series');
+      return this.loc(mask.dtype === 'boolean' ? mask.fillna(false).astype('bool') : mask);
+    }
     const pos: number[] = [];
     let i = 0;
     for (const [label, row] of this.iterrows()) {
-      if (predicate(row, label)) pos.push(i);
+      if (expr(row, label)) pos.push(i);
       i++;
     }
     return this.take(pos);
+  }
+
+  /**
+   * Evaluates a pandas-style expression over the columns. Assignments
+   * (`'c = a + b'`, several separated by newlines or ';') return a new frame
+   * (or modify this one with `inplace`); otherwise the expression's value is returned.
+   */
+  eval(expr: string, options: { locals?: Record<string, unknown>; inplace?: boolean } = {}): unknown {
+    const target = options.inplace ? this : this.copy({ deep: false });
+    return evaluateStatements(expr, { frame: target, locals: options.locals }).value;
   }
 
   /** Selects columns by name: exact `items`, substring `like` or `regex`. */
@@ -594,25 +614,35 @@ export class DataFrame {
     return this.with(cols, new Index(labels));
   }
 
-  /** Pairwise Pearson correlation of numeric columns. */
-  corr(): DataFrame {
-    return this.pairwise((x, y) => {
-      const { sxy, sxx, syy } = moments(x, y);
-      return sxy / Math.sqrt(sxx * syy);
-    });
+  /** Pairwise correlation of numeric columns: pearson (default), spearman or kendall. */
+  corr(options: { method?: CorrMethod; minPeriods?: number } = {}): DataFrame {
+    return this.pairwise((x, y) => correlation(x, y, options.method, options.minPeriods));
   }
 
   /** Pairwise sample covariance of numeric columns. */
-  cov(): DataFrame {
-    return this.pairwise((x, y) => {
-      const { n, sxy } = moments(x, y);
-      return n > 1 ? sxy / (n - 1) : NaN;
-    });
+  cov(options: { minPeriods?: number; ddof?: number } = {}): DataFrame {
+    return this.pairwise((x, y) => covariance(x, y, options.minPeriods, options.ddof));
+  }
+
+  /** Correlation of each column with the same-named column of `other` (or with a Series). */
+  corrwith(other: DataFrame | Series, options: { method?: CorrMethod; axis?: 0 | 1 | 'index' | 'columns' } = {}): Series {
+    if (isAxis1(options.axis)) {
+      const o = other instanceof DataFrame ? other : null;
+      const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype) && (!o || o.has(c)));
+      const vals = Array.from({ length: this.length }, (_, i) => {
+        const x = Float64Array.from(names, (n) => Number(this._cols.get(n)!.get(i) ?? NaN));
+        const y = Float64Array.from(names, (n) => Number((o ? o._column(n).get(i) : (other as Series).get(n, NaN)) ?? NaN));
+        return correlation(x, y, options.method);
+      });
+      return new Series(vals, { index: this.index });
+    }
+    const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype) && (other instanceof Series || other.has(c)));
+    return new Series(names.map((n) => this.get(n).corr(other instanceof Series ? other : other.get(n), { method: options.method })), { index: names });
   }
 
   private pairwise(fn: (x: ArrayLike<number>, y: ArrayLike<number>) => number): DataFrame {
     const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
-    const data = names.map((n) => this._cols.get(n)!.data as ArrayLike<number>);
+    const data = names.map((n) => numericView(this._cols.get(n)!));
     const cols = new Map<string, Column>();
     names.forEach((n, j) => cols.set(n, new Column('float64', Float64Array.from(names.map((_, i) => fn(data[i], data[j]))))));
     return this.with(cols, new Index(names));
@@ -639,7 +669,7 @@ export class DataFrame {
   shift(periods = 1): DataFrame { return this.mapColumns((s) => s.shift(periods)); }
   diff(periods = 1): DataFrame { return this.mapColumns((s) => s.diff(periods), true); }
   pctChange(periods = 1): DataFrame { return this.mapColumns((s) => s.pctChange(periods), true); }
-  rank(options: { ascending?: boolean } = {}): DataFrame { return this.mapColumns((s) => s.rank(options)); }
+  rank(options: RankOptions & { numericOnly?: boolean } = {}): DataFrame { return this.mapColumns((s) => s.rank(options), options.numericOnly); }
 
   /**
    * `axis: 0` (default) calls `fn(series, column)` per column; `axis: 1` calls
@@ -734,7 +764,7 @@ export class DataFrame {
 
   ffill(limit?: number): DataFrame { return this.mapColumns((s) => s.ffill(limit)); }
   bfill(limit?: number): DataFrame { return this.mapColumns((s) => s.bfill(limit)); }
-  interpolate(): DataFrame { return this.mapColumns((s) => s.interpolate(), true); }
+  interpolate(options: InterpolateOptions = {}): DataFrame { return this.mapColumns((s) => s.interpolate(options), true); }
 
   /**
    * Drops rows (axis 0) or columns (axis 1) with missing values.
@@ -809,11 +839,15 @@ export class DataFrame {
 
   // ---------------------------------------------------------- group / combine
 
-  groupby(by: string | readonly string[], options: GroupByOptions = {}): DataFrameGroupBy {
-    const keys = typeof by === 'string' ? [by] : [...by];
-    for (const k of keys) this._column(k);
-    return new DataFrameGroupBy(this, keys, options);
+  /**
+   * Groups rows by column name(s), Series, arrays of keys, functions of the
+   * index label, and/or index levels (`{ level }`).
+   */
+  groupby(by: GroupKey | readonly GroupKey[] | null, options: GroupByOptions = {}): DataFrameGroupBy {
+    const r = resolveGroupKeys(this, by, options.level);
+    return new DataFrameGroupBy(r.frame, r.by, options, null, r.names);
   }
+
 
   merge(right: DataFrame, options: MergeOptions = {}): DataFrame {
     return merge(this, right, options);
@@ -1033,20 +1067,4 @@ function toColumn(v: unknown, index: Index, dtype?: DType): Column {
   return Column.full(index.length, v, dtype);
 }
 
-function moments(x: ArrayLike<number>, y: ArrayLike<number>) {
-  let n = 0, sx = 0, sy = 0;
-  for (let i = 0; i < x.length; i++) {
-    if (Number.isNaN(x[i]) || Number.isNaN(y[i])) continue;
-    n++; sx += x[i]; sy += y[i];
-  }
-  const mx = sx / n, my = sy / n;
-  let sxy = 0, sxx = 0, syy = 0;
-  for (let i = 0; i < x.length; i++) {
-    if (Number.isNaN(x[i]) || Number.isNaN(y[i])) continue;
-    sxy += (x[i] - mx) * (y[i] - my);
-    sxx += (x[i] - mx) ** 2;
-    syy += (y[i] - my) ** 2;
-  }
-  return { n, mx, my, sxy, sxx, syy };
-}
 

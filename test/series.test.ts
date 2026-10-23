@@ -222,7 +222,7 @@ describe('accessors', () => {
     assert.deepEqual(s.str.contains('a').toArray(), [false, true, null]);
     assert.deepEqual(s.str.len().toArray(), [5, 3, NaN]);
     assert.deepEqual(new Series(['a-b', 'c-d']).str.split('-').str.get(1).toArray(), ['b', 'd']);
-    assert.deepEqual(new Series(['ab12', 'x9']).str.extract(/(\d+)/).toArray(), ['12', '9']);
+    assert.deepEqual(new Series(['ab12', 'x9']).str.extract(/(\d+)/, { expand: false }).toArray(), ['12', '9']);
   });
 
   it('dt fields', () => {
