@@ -8,6 +8,7 @@ import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from '.
 import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
 import { onAxis, unstack, xs } from './levels.ts';
 import { combineFirst, compare, explodeSeries, update } from './combine.ts';
+import { toHdf } from './io/hdf.ts';
 
 import { atTimePositions, betweenTimePositions, shiftIndex, toPeriodIndex, toTimestampIndex, truncatePositions, tzConvertIndex, tzLocalizeIndex } from './timeindex.ts';
 import type { Ambiguous, Nonexistent } from './core/tz.ts';
@@ -1033,6 +1034,20 @@ export class Series {
   /** Differences with `other` as self/other columns. */
   compare(other: Series, options: { keepShape?: boolean; keepEqual?: boolean; resultNames?: [string, string] } = {}): DataFrame {
     return compare(this, other, options);
+  }
+
+  /** CSV text of the series (with its index); writes to `path` when given. */
+  toCsv(path?: string, options: Parameters<DataFrame['toCsv']>[1] = {}): string {
+    return this.toFrame(this.name ?? '0').toCsv(path, options);
+  }
+
+  toJson(path?: string, options: Parameters<DataFrame['toJson']>[1] = {}): string {
+    return this.toFrame(this.name ?? '0').toJson(path, options);
+  }
+
+  /** Writes HDF5 in pandas' 'table' format (requires the optional `h5wasm`). */
+  toHdf(path: string, key: string, options: { mode?: 'a' | 'w' } = {}): Promise<void> {
+    return toHdf(this, path, key, options);
   }
 
   // ------------------------------------------------------------- MultiIndex

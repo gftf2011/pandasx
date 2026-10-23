@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readText, readTextSync, writeOutput, type Compression, type Source } from './source.ts';
 import { Column } from '../core/column.ts';
 import { Index } from '../core/indexes.ts';
 import type { Label } from '../core/types.ts';
@@ -11,15 +11,53 @@ import { DataFrame } from '../frame.ts';
  * - `split`    `{columns, index, data}`
  * - `values`   `[[v, ...], ...]`
  */
-export type JsonOrient = 'records' | 'columns' | 'index' | 'split' | 'values';
+export type JsonOrient = 'records' | 'columns' | 'index' | 'split' | 'values' | 'table';
 
-/** Reads JSON from a file path or a JSON string. The orient is detected when omitted. */
-export function readJson(source: string, options: { orient?: JsonOrient; lines?: boolean } = {}): DataFrame {
-  const text = !source.trimStart().startsWith('[') && !source.trimStart().startsWith('{') && existsSync(source) ? readFileSync(source, 'utf8') : source;
+export interface ReadJsonOptions {
+  orient?: JsonOrient;
+  /** One JSON object per line (JSON Lines). */
+  lines?: boolean;
+  /** With `lines`, yield frames of this many rows. */
+  chunksize?: number;
+  compression?: Compression;
+  encoding?: BufferEncoding;
+  /** Columns to parse as datetimes. */
+  convertDates?: readonly string[];
+}
+
+/** Reads JSON from a path, buffer or JSON text. The orient is detected when omitted. */
+export function readJson(source: Source, options: ReadJsonOptions & { chunksize: number }): Generator<DataFrame>;
+export function readJson(source: Source, options?: ReadJsonOptions): DataFrame;
+export function readJson(source: Source, options: ReadJsonOptions = {}): DataFrame | Generator<DataFrame> {
+  const text = readTextSync(source, { compression: options.compression, encoding: options.encoding, literal: (s) => /^\s*[[{]/.test(s) });
+  return parseJsonText(text, options);
+}
+
+/** Reads JSON from a path, URL or buffer, asynchronously. */
+export async function readJsonAsync(source: Source, options: ReadJsonOptions & { storageOptions?: RequestInit } = {}): Promise<DataFrame> {
+  const text = await readText(source, { compression: options.compression, encoding: options.encoding, storageOptions: options.storageOptions, literal: (s) => /^\s*[[{]/.test(s) });
+  return parseJsonText(text, { ...options, chunksize: undefined }) as DataFrame;
+}
+
+function parseJsonText(text: string, options: ReadJsonOptions): DataFrame | Generator<DataFrame> {
+  const dates = (df: DataFrame) => {
+    for (const c of options.convertDates ?? []) if (df.has(c)) df.set(c, df.get(c).astype('datetime'));
+    return df;
+  };
   if (options.lines) {
-    return new DataFrame(text.split(/\r?\n/).filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as Record<string, unknown>));
+    const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
+    if (options.chunksize) {
+      const size = options.chunksize;
+      return (function* () {
+        for (let i = 0; i < lines.length; i += size) {
+          const df = new DataFrame(lines.slice(i, i + size).map((l) => JSON.parse(l) as Record<string, unknown>));
+          yield dates(DataFrame._fromColumns(df._cols, Index.range(df.length, i)));
+        }
+      })();
+    }
+    return dates(new DataFrame(lines.map((l) => JSON.parse(l) as Record<string, unknown>)));
   }
-  return fromJsonValue(JSON.parse(text), options.orient);
+  return dates(fromJsonValue(JSON.parse(text), options.orient));
 }
 
 export function fromJsonValue(data: unknown, orient?: JsonOrient): DataFrame {
@@ -32,6 +70,14 @@ export function fromJsonValue(data: unknown, orient?: JsonOrient): DataFrame {
     case 'split': {
       const { columns, index, data: rows } = data as { columns: string[]; index?: Label[]; data: unknown[][] };
       return new DataFrame(rows, { columns, index });
+    }
+    case 'table': {
+      const { schema, data: rows } = data as { schema: { fields: { name: string; type: string }[]; primaryKey?: string[] }; data: Record<string, unknown>[] };
+      let df = new DataFrame(rows, { columns: schema.fields.map((f) => f.name) });
+      for (const f of schema.fields) if (f.type === 'datetime') df.set(f.name, df.get(f.name).astype('datetime'));
+      if (schema.primaryKey?.length) df = df.setIndex(schema.primaryKey.length === 1 ? schema.primaryKey[0] : schema.primaryKey);
+      if (df.index.name === 'index') df.index = df.index.rename(null);
+      return df;
     }
     case 'index': {
       const obj = data as Record<string, Record<string, unknown>>;
@@ -51,6 +97,7 @@ export function fromJsonValue(data: unknown, orient?: JsonOrient): DataFrame {
 
 function detectOrient(data: unknown): JsonOrient {
   if (Array.isArray(data)) return data.length > 0 && Array.isArray(data[0]) ? 'values' : 'records';
+  if (data && typeof data === 'object' && 'schema' in data && 'data' in data) return 'table';
   if (data && typeof data === 'object' && 'columns' in data && 'data' in data) return 'split';
   return 'columns';
 }
@@ -67,11 +114,16 @@ function jsonValue(v: unknown): unknown {
 }
 
 /** Serialises a frame to JSON; writes to `path` when given and always returns the text. */
-export function toJson(df: DataFrame, path?: string, options: { orient?: JsonOrient; indent?: number } = {}): string {
-  const orient = options.orient ?? 'columns';
+export function toJson(df: DataFrame, path?: string, options: { orient?: JsonOrient; indent?: number; lines?: boolean; compression?: Compression; dateFormat?: 'iso' | 'epoch' } = {}): string {
+  const orient = options.lines ? 'records' : (options.orient ?? 'columns');
+  if (options.lines && options.orient && options.orient !== 'records') throw new Error("lines requires orient 'records'");
   const names = df.columns;
   const labels = df.index.labels.map((l) => (Array.isArray(l) ? l.join(',') : String(l)));
-  const cell = (n: string, i: number) => jsonValue(df._column(n).get(i));
+  const cell = (n: string, i: number) => {
+    const v = df._column(n).get(i);
+    if (options.dateFormat === 'epoch' && v instanceof Date) return v.getTime();
+    return jsonValue(v);
+  };
   let value: unknown;
   switch (orient) {
     case 'records':
@@ -86,10 +138,27 @@ export function toJson(df: DataFrame, path?: string, options: { orient?: JsonOri
     case 'index':
       value = Object.fromEntries(labels.map((l, i) => [l, Object.fromEntries(names.map((n) => [n, cell(n, i)]))]));
       break;
+    case 'table':
+      value = {
+        schema: { fields: [{ name: df.index.name ?? 'index', type: 'integer' }, ...names.map((n) => ({ name: n, type: tableType(df._column(n).dtype) }))], primaryKey: [df.index.name ?? 'index'], pandas_version: '1.4.0' },
+        data: Array.from({ length: df.length }, (_, i) => ({ [df.index.name ?? 'index']: jsonValue(df.index.labels[i]), ...Object.fromEntries(names.map((n) => [n, cell(n, i)])) })),
+      };
+      break;
     default:
       value = Object.fromEntries(names.map((n) => [n, Object.fromEntries(labels.map((l, i) => [l, cell(n, i)]))]));
   }
-  const text = JSON.stringify(value, null, options.indent);
-  if (path) writeFileSync(path, text, 'utf8');
+  const text = options.lines
+    ? (value as unknown[]).map((r) => JSON.stringify(r)).join('\n') + '\n'
+    : JSON.stringify(value, null, options.indent);
+  if (path) writeOutput(path, text, options.compression);
   return text;
+}
+
+function tableType(dtype: string): string {
+  if (dtype === 'int64' || dtype === 'Int64') return 'integer';
+  if (dtype === 'float64' || dtype === 'Float64') return 'number';
+  if (dtype === 'bool' || dtype === 'boolean') return 'boolean';
+  if (dtype === 'datetime') return 'datetime';
+  if (dtype === 'timedelta') return 'duration';
+  return 'string';
 }

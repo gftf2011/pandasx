@@ -36,6 +36,35 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "apache-arrow": "21.2.0",
+    "exceljs": "4.4.0",
+    "h5wasm": "0.10.3",
+    "hyparquet": "1.31.3",
+    "hyparquet-writer": "0.16.11",
     "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "exceljs": "^4.4.0",
+    "hyparquet": "^1.31.0",
+    "hyparquet-writer": "^0.16.11",
+    "apache-arrow": ">=17",
+    "h5wasm": "^0.10.0"
+  },
+  "peerDependenciesMeta": {
+    "exceljs": {
+      "optional": true
+    },
+    "hyparquet": {
+      "optional": true
+    },
+    "hyparquet-writer": {
+      "optional": true
+    },
+    "apache-arrow": {
+      "optional": true
+    },
+    "h5wasm": {
+      "optional": true
+    }
   }
 }

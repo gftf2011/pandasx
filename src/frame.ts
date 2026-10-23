@@ -20,7 +20,13 @@ import { atTimePositions, betweenTimePositions, shiftIndex, toPeriodIndex, toTim
 import type { Ambiguous, Nonexistent } from './core/tz.ts';
 
 import { toCsv, type ToCsvOptions } from './io/csv.ts';
-import { toJson, type JsonOrient } from './io/json.ts';
+import { toJson } from './io/json.ts';
+import { toHtml, type ToHtmlOptions } from './io/html.ts';
+import { toXml, type ToXmlOptions } from './io/xml.ts';
+import { toSql, type SqlConnection, type ToSqlOptions } from './io/sql.ts';
+import { toExcel, type ToExcelOptions } from './io/excel.ts';
+import { toFeather, toParquet, type ToParquetOptions } from './io/columnar.ts';
+import { toHdf, type ToHdfOptions } from './io/hdf.ts';
 import {
   dropMatchedLevels, duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, resolveRows, labelPositions, positionalPositions, samplePositions,
   Series, toIndex, type Mask, type Operand, type RowSelector,
@@ -1215,8 +1221,43 @@ export class DataFrame {
     return toCsv(this, path, options);
   }
 
-  toJson(path?: string, options: { orient?: JsonOrient; indent?: number } = {}): string {
+  toJson(path?: string, options: Parameters<typeof toJson>[2] = {}): string {
     return toJson(this, path, options);
+  }
+
+  /** HTML table markup (pandas-compatible); writes to `path` when given. */
+  toHtml(path?: string, options: ToHtmlOptions = {}): string {
+    return toHtml(this, path, options);
+  }
+
+  /** Writes rows to a SQL table (sqlite path, node:sqlite / better-sqlite3 / pg / mysql2 connection). */
+  toSql(table: string, conn: SqlConnection, options: ToSqlOptions = {}): Promise<number> {
+    return toSql(this, table, conn, options);
+  }
+
+  /** Writes an .xlsx workbook (requires the optional `exceljs`); resolves to the file bytes. */
+  toExcel(path?: string, options: ToExcelOptions = {}): Promise<Buffer> {
+    return toExcel(this, path, options);
+  }
+
+  /** Writes Parquet (requires the optional `hyparquet-writer`); resolves to the bytes. */
+  toParquet(path?: string, options: ToParquetOptions = {}): Promise<Buffer> {
+    return toParquet(this, path, options);
+  }
+
+  /** Writes Feather / Arrow IPC (requires the optional `apache-arrow`); resolves to the bytes. */
+  toFeather(path?: string, options: { index?: boolean } = {}): Promise<Buffer> {
+    return toFeather(this, path, options);
+  }
+
+  /** Writes HDF5 in pandas' 'table' format (requires the optional `h5wasm`). */
+  toHdf(path: string, key: string, options: ToHdfOptions = {}): Promise<void> {
+    return toHdf(this, path, key, options);
+  }
+
+  /** XML document (pandas layout); writes to `path` when given. */
+  toXml(path?: string, options: ToXmlOptions = {}): string {
+    return toXml(this, path, options);
   }
 
   /** Concise summary: dtypes and non-null counts per column. */

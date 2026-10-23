@@ -4,8 +4,15 @@ export { DataFrameGroupBy, SeriesGroupBy, type GroupByOptions, type AggSpec } fr
 export { concat, merge, type ConcatOptions, type MergeOptions } from './reshape.ts';
 export { toDatetime, toTimedelta, dateRange, bdateRange, periodRange, timedeltaRange, type ToDatetimeOptions, type DateRangeOptions } from './datetimes.ts';
 export { offsets, toOffset, DateOffset, type BusinessOptions } from './core/offsets.ts';
-export { readCsv, parseCsv, toCsv, type ReadCsvOptions, type ToCsvOptions } from './io/csv.ts';
-export { readJson, toJson, type JsonOrient } from './io/json.ts';
+export { readCsv, readCsvAsync, readCsvChunks, readTable, readFwf, parseCsv, toCsv, CsvTokenizer, type ReadCsvOptions, type ToCsvOptions } from './io/csv.ts';
+export type { Compression, Source } from './io/source.ts';
+export { readHtml, readHtmlAsync, toHtml, type ReadHtmlOptions, type ToHtmlOptions } from './io/html.ts';
+export { readXml, readXmlAsync, toXml, type ReadXmlOptions, type ToXmlOptions } from './io/xml.ts';
+export { readExcel, toExcel, ExcelWriter, type ReadExcelOptions, type ToExcelOptions } from './io/excel.ts';
+export { readParquet, toParquet, readFeather, toFeather, fromArrow, toArrow, type ReadParquetOptions, type ToParquetOptions } from './io/columnar.ts';
+export { readHdf, toHdf, hdfKeys, type ToHdfOptions } from './io/hdf.ts';
+export { readSql, readSqlQuery, readSqlTable, readSqlChunks, toSql, type SqlConnection, type SqlDialect, type ReadSqlOptions, type ToSqlOptions } from './io/sql.ts';
+export { readJson, readJsonAsync, toJson, type JsonOrient, type ReadJsonOptions } from './io/json.ts';
 export { Index, MultiIndex, Slice, slice } from './core/indexes.ts';
 export { Interval, type IntervalClosed } from './core/interval.ts';
 export { pivotTable, crosstab, getDummies, fromDummies, cut, qcut, intervalRange, factorize, unique, wideToLong, type PivotTableOptions, type CrosstabOptions, type DummiesOptions, type CutOptions } from './pivot.ts';
