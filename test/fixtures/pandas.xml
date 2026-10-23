@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data>
+  <row>
+    <id>r1</id>
+    <i>1</i>
+    <f>1.5</f>
+    <s>x</s>
+    <b>True</b>
+    <t>2024-01-01 00:00:00</t>
+  </row>
+  <row>
+    <id>r2</id>
+    <i>2</i>
+    <f/>
+    <s/>
+    <b>False</b>
+    <t>2024-01-02 10:00:00</t>
+  </row>
+  <row>
+    <id>r3</id>
+    <i>3</i>
+    <f>3.0</f>
+    <s>zzã</s>
+    <b>True</b>
+    <t/>
+  </row>
+</data>
