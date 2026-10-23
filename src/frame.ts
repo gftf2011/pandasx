@@ -1,0 +1,941 @@
+import { aggregate, NUMERIC_AGGS, quantile, type AggOptions } from './core/aggregate.ts';
+import { Column } from './core/column.ts';
+import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
+import { Index, Slice } from './core/indexes.ts';
+import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
+import { isNumericDType, type AggName, type DType, type Label } from './core/types.ts';
+import { compareValues, hashKey } from './core/values.ts';
+import { DataFrameGroupBy, type GroupByOptions } from './groupby.ts';
+import { merge, type MergeOptions } from './reshape.ts';
+import { toCsv, type ToCsvOptions } from './io/csv.ts';
+import { toJson, type JsonOrient } from './io/json.ts';
+import {
+  duplicatedFlags, isMask, isPlainObject, KeyError, labelPositions, positionalPositions, samplePositions,
+  Series, toIndex, type Mask, type Operand, type RowSelector,
+} from './series.ts';
+
+export interface FrameOptions {
+  index?: Index | readonly Label[];
+  columns?: readonly string[];
+  dtype?: DType | Record<string, DType>;
+}
+
+/** Column-oriented `{name: values}`, row records, or rows as arrays. */
+export type FrameInput =
+  | Record<string, unknown>
+  | readonly Record<string, unknown>[]
+  | readonly (readonly unknown[])[];
+
+export type ColSelector = string | readonly string[] | readonly boolean[] | Slice;
+
+/** A Series (aligned on the index), an array, or a scalar broadcast to every row. */
+export type ColumnValue = Series | readonly unknown[] | ArrayLike<unknown> | Column | string | number | boolean | Date | null | undefined;
+
+export interface AxisAggOptions extends AggOptions {
+  /** 0 / 'index' reduces each column (default); 1 / 'columns' reduces each row. */
+  axis?: 0 | 1 | 'index' | 'columns';
+  /** Only consider numeric columns. Defaults to true for numeric reductions (sum, mean, std, ...). */
+  numericOnly?: boolean;
+}
+
+type AggFn = AggName | ((s: Series) => unknown);
+
+const isAxis1 = (axis: unknown) => axis === 1 || axis === 'columns';
+
+/** Two-dimensional labeled table with typed columns, the equivalent of `pandas.DataFrame`. */
+export class DataFrame {
+  /** @internal */
+  readonly _cols: Map<string, Column>;
+  readonly index: Index;
+
+  constructor(data: FrameInput = {}, options: FrameOptions = {}) {
+    const cols = new Map<string, Column>();
+    let index: Index;
+    const dtypeFor = (name: string) => (typeof options.dtype === 'string' ? options.dtype : options.dtype?.[name]);
+
+    if (Array.isArray(data)) {
+      const rows = data as readonly unknown[];
+      if (rows.length > 0 && Array.isArray(rows[0])) {
+        const width = Math.max(...(rows as unknown[][]).map((r) => r.length));
+        const names = options.columns ?? Array.from({ length: width }, (_, j) => String(j));
+        names.forEach((name, j) => cols.set(name, Column.from((rows as unknown[][]).map((r) => r[j]), dtypeFor(name))));
+      } else {
+        const names = options.columns ? [...options.columns] : unionKeys(rows as Record<string, unknown>[]);
+        for (const name of names) cols.set(name, Column.from((rows as Record<string, unknown>[]).map((r) => r?.[name]), dtypeFor(name)));
+      }
+      index = toIndex(options.index, rows.length);
+    } else {
+      const entries = Object.entries(data as Record<string, unknown>).filter(([k]) => !options.columns || options.columns.includes(k));
+      const series = entries.filter(([, v]) => v instanceof Series).map(([, v]) => v as Series);
+      // Index: explicit, else union of Series indexes, else 0..n-1.
+      if (options.index !== undefined) index = options.index instanceof Index ? options.index : new Index([...options.index]);
+      else if (series.length > 0) index = series.slice(1).reduce((idx, s) => (idx.equals(s.index) ? idx : idx.union(s.index)), series[0].index);
+      else {
+        const first = entries.find(([, v]) => isArrayish(v));
+        index = Index.range(first ? (first[1] as ArrayLike<unknown>).length : entries.length ? 1 : 0);
+      }
+      for (const [name, v] of entries) cols.set(name, toColumn(v, index, dtypeFor(name)));
+      for (const name of options.columns ?? []) if (!cols.has(name)) cols.set(name, Column.full(index.length, null));
+    }
+    for (const [name, col] of cols) {
+      if (col.length !== index.length) throw new RangeError(`Column "${name}" has length ${col.length}, expected ${index.length}`);
+    }
+    this._cols = cols;
+    this.index = index;
+  }
+
+  /** @internal Builds a frame from already-validated columns. */
+  static _fromColumns(cols: Map<string, Column>, index: Index): DataFrame {
+    const df = Object.create(DataFrame.prototype) as { _cols: Map<string, Column>; index: Index };
+    df._cols = cols;
+    df.index = index;
+    return df as unknown as DataFrame;
+  }
+
+  static fromRecords(records: readonly Record<string, unknown>[], options: FrameOptions = {}): DataFrame {
+    return new DataFrame(records, options);
+  }
+
+  private with(cols: Map<string, Column>, index: Index = this.index): DataFrame {
+    return DataFrame._fromColumns(cols, index);
+  }
+
+  // ---------------------------------------------------------------- attributes
+
+  get columns(): string[] {
+    return [...this._cols.keys()];
+  }
+
+  get shape(): [number, number] {
+    return [this.index.length, this._cols.size];
+  }
+
+  get length(): number {
+    return this.index.length;
+  }
+
+  get size(): number {
+    return this.index.length * this._cols.size;
+  }
+
+  get empty(): boolean {
+    return this.index.length === 0 || this._cols.size === 0;
+  }
+
+  get dtypes(): Series {
+    return new Series([...this._cols.values()].map((c) => c.dtype), { index: this.columns, dtype: 'string' });
+  }
+
+  /** Rows as arrays (like `df.values` / `to_numpy()`). */
+  get values(): unknown[][] {
+    const cols = [...this._cols.values()];
+    return Array.from({ length: this.length }, (_, i) => cols.map((c) => c.get(i)));
+  }
+
+  /** Transpose (columns become rows). */
+  get T(): DataFrame {
+    return this.transpose();
+  }
+
+  transpose(): DataFrame {
+    const cols = new Map<string, Column>();
+    const src = [...this._cols.values()];
+    for (let i = 0; i < this.length; i++) cols.set(String(this.index.labels[i]), Column.from(src.map((c) => c.get(i))));
+    return this.with(cols, new Index(this.columns));
+  }
+
+  /** @internal */
+  _column(name: string): Column {
+    const col = this._cols.get(name);
+    if (!col) throw new KeyError(name);
+    return col;
+  }
+
+  has(column: string): boolean {
+    return this._cols.has(column);
+  }
+
+  *[Symbol.iterator](): IterableIterator<string> {
+    yield* this._cols.keys();
+  }
+
+  /** `[name, Series]` pairs. */
+  *items(): IterableIterator<[string, Series]> {
+    for (const name of this._cols.keys()) yield [name, this.get(name)];
+  }
+
+  /** `[label, row]` pairs; rows are plain objects. */
+  *iterrows(): IterableIterator<[Label, Record<string, unknown>]> {
+    const entries = [...this._cols.entries()];
+    for (let i = 0; i < this.length; i++) {
+      const row: Record<string, unknown> = {};
+      for (const [k, c] of entries) row[k] = c.get(i);
+      yield [this.index.labels[i], row];
+    }
+  }
+
+  // ----------------------------------------------------------------- selection
+
+  /** `df.get('a')` ≈ `df['a']`; a list selects columns; a boolean mask selects rows. */
+  get(column: string): Series;
+  get(columns: readonly string[]): DataFrame;
+  get(mask: Mask): DataFrame;
+  get(key: string | readonly string[] | Mask): Series | DataFrame {
+    if (typeof key === 'string') return Series._from(this._column(key), this.index, key);
+    if (isMask(key)) return this.loc(key);
+    return this.with(new Map((key as readonly string[]).map((k) => [k, this._column(k)])));
+  }
+
+  /** Sets (or replaces) a column in place, like `df['c'] = value`. Returns `this`. */
+  set(column: string, value: ColumnValue): this {
+    this._cols.set(column, toColumn(value, this.index));
+    return this;
+  }
+
+  /** Returns a new frame with extra/replaced columns; values may be functions of the frame. */
+  assign(columns: Record<string, ColumnValue | ((df: DataFrame) => ColumnValue)>): DataFrame {
+    let out: DataFrame = this.copy({ deep: false });
+    for (const [name, v] of Object.entries(columns)) {
+      out = out.copy({ deep: false });
+      out._cols.set(name, toColumn(typeof v === 'function' ? (v as (df: DataFrame) => ColumnValue)(out) : v, out.index));
+    }
+    return out;
+  }
+
+  /** Inserts a column at position `loc` in place. */
+  insert(loc: number, column: string, value: ColumnValue): this {
+    if (this._cols.has(column)) throw new Error(`Cannot insert ${column}, already exists`);
+    const entries = [...this._cols.entries()];
+    entries.splice(loc, 0, [column, toColumn(value, this.index)]);
+    this._cols.clear();
+    for (const [k, v] of entries) this._cols.set(k, v);
+    return this;
+  }
+
+  /** Removes a column in place and returns it. */
+  pop(column: string): Series {
+    const s = this.get(column);
+    this._cols.delete(column);
+    return s;
+  }
+
+  /** Label-based selection. Row keys: label, labels, mask, slice (inclusive), callable or `null` for all. */
+  loc(rows: readonly Label[] | Mask | Slice | null | ((df: DataFrame) => Mask), cols: string): Series;
+  loc(rows: readonly Label[] | Mask | Slice | null | ((df: DataFrame) => Mask), cols?: Exclude<ColSelector, string> | null): DataFrame;
+  loc(rows: Label, cols: string): unknown;
+  loc(rows: Label, cols?: Exclude<ColSelector, string> | null): Series;
+  loc(rows: RowSelector | null | ((df: DataFrame) => Mask), cols: ColSelector | null = null): unknown {
+    if (typeof rows === 'function') return this.loc(rows(this), cols as never);
+    const rowScalar = rows !== null && !(rows instanceof Slice) && !isMask(rows) && !(Array.isArray(rows) && !(this.index.nlevels > 1 && !Array.isArray(rows[0])));
+    const pos = rows === null ? null : labelPositions(rows, this.index);
+    return this.select(pos, rowScalar && pos!.length === 1, cols, false);
+  }
+
+  /** Position-based selection. Row keys: integer, integers, mask, slice (exclusive), callable or `null`. */
+  iloc(rows: number, cols: number): unknown;
+  iloc(rows: number, cols?: readonly number[] | Slice | null): Series;
+  iloc(rows: readonly number[] | Mask | Slice | null, cols: number): Series;
+  iloc(rows: readonly number[] | Mask | Slice | null, cols?: readonly number[] | Slice | null): DataFrame;
+  iloc(rows: number | readonly number[] | Mask | Slice | null, cols: number | readonly number[] | Slice | null = null): unknown {
+    const pos = rows === null ? null : positionalPositions(rows, this.length);
+    const names = this.columns;
+    let colSel: ColSelector | null = null;
+    if (typeof cols === 'number') colSel = names[positionalPositions(cols, names.length)[0]];
+    else if (cols !== null) colSel = positionalPositions(cols, names.length).map((p) => names[p]);
+    return this.select(pos, typeof rows === 'number', colSel, true);
+  }
+
+  private select(pos: number[] | null, rowScalar: boolean, cols: ColSelector | null, positional: boolean): unknown {
+    let names: string[];
+    if (cols === null) names = this.columns;
+    else if (typeof cols === 'string') names = [cols];
+    else if (cols instanceof Slice) {
+      const idx = new Index(this.columns);
+      names = (positional ? cols.positions(idx.length) : cols.labelPositions(idx)).map((p) => this.columns[p]);
+    } else if (cols.length > 0 && typeof cols[0] === 'boolean') names = this.columns.filter((_, j) => (cols as boolean[])[j]);
+    else names = [...(cols as readonly string[])];
+    const colScalar = typeof cols === 'string';
+
+    if (rowScalar) {
+      const p = pos![0];
+      if (colScalar) return this._column(names[0]).get(p);
+      return new Series(names.map((n) => this._column(n).get(p)), { index: names, name: labelName(this.index.labels[p]) });
+    }
+    const index = pos ? this.index.take(pos) : this.index;
+    const take = (c: Column) => (pos ? c.take(pos) : c);
+    if (colScalar) return Series._from(take(this._column(names[0])), index, names[0]);
+    return this.with(new Map(names.map((n) => [n, take(this._column(n))])), index);
+  }
+
+  /** Single value by row label and column. */
+  at(row: Label, column: string): unknown {
+    const locs = this.index.getLoc(row);
+    if (locs.length === 0) throw new KeyError(row);
+    return this._column(column).get(locs[0]);
+  }
+
+  iat(row: number, column: number): unknown {
+    return this.iloc(row, column);
+  }
+
+  /** @internal Rows at positions. */
+  take(positions: ArrayLike<number>): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const [k, c] of this._cols) cols.set(k, c.take(positions));
+    return this.with(cols, this.index.take(positions));
+  }
+
+  head(n = 5): DataFrame {
+    return this.iloc(new Slice(0, n < 0 ? this.length + n : n));
+  }
+
+  tail(n = 5): DataFrame {
+    return this.iloc(new Slice(n === 0 ? this.length : -n));
+  }
+
+  sample(n = 1, options: { seed?: number; frac?: number } = {}): DataFrame {
+    const k = options.frac !== undefined ? Math.round(options.frac * this.length) : n;
+    return this.take(samplePositions(this.length, k, options.seed));
+  }
+
+  /** Rows for which `predicate(row, label)` is true (a callback stand-in for `DataFrame.query`). */
+  query(predicate: (row: Record<string, unknown>, label: Label) => boolean): DataFrame {
+    const pos: number[] = [];
+    let i = 0;
+    for (const [label, row] of this.iterrows()) {
+      if (predicate(row, label)) pos.push(i);
+      i++;
+    }
+    return this.take(pos);
+  }
+
+  /** Selects columns by name: exact `items`, substring `like` or `regex`. */
+  filter(options: { items?: readonly string[]; like?: string; regex?: RegExp | string }): DataFrame {
+    let names = this.columns;
+    if (options.items) names = options.items.filter((c) => this._cols.has(c));
+    if (options.like !== undefined) names = names.filter((c) => c.includes(options.like!));
+    if (options.regex !== undefined) {
+      const re = typeof options.regex === 'string' ? new RegExp(options.regex) : options.regex;
+      names = names.filter((c) => re.test(c));
+    }
+    return this.get(names);
+  }
+
+  selectDtypes(options: { include?: readonly (DType | 'number')[]; exclude?: readonly (DType | 'number')[] }): DataFrame {
+    const matches = (d: DType, list: readonly (DType | 'number')[]) => list.includes(d) || (list.includes('number') && isNumericDType(d) && d !== 'bool');
+    return this.get(this.columns.filter((c) => {
+      const d = this._cols.get(c)!.dtype;
+      return (!options.include || matches(d, options.include)) && (!options.exclude || !matches(d, options.exclude));
+    }));
+  }
+
+  drop(columns: string | readonly string[]): DataFrame;
+  drop(options: { columns?: string | readonly string[]; index?: Label | readonly Label[] }): DataFrame;
+  drop(arg: string | readonly string[] | { columns?: string | readonly string[]; index?: Label | readonly Label[] }): DataFrame {
+    const opts = typeof arg === 'string' || Array.isArray(arg) ? { columns: arg as string | string[] } : (arg as { columns?: string | string[]; index?: Label | Label[] });
+    let out: DataFrame = this;
+    if (opts.columns !== undefined) {
+      const drop = new Set(typeof opts.columns === 'string' ? [opts.columns] : opts.columns);
+      for (const c of drop) if (!this._cols.has(c)) throw new KeyError(c);
+      out = this.with(new Map([...this._cols].filter(([k]) => !drop.has(k))));
+    }
+    if (opts.index !== undefined) {
+      const labels = Array.isArray(opts.index) && this.index.nlevels === 1 ? opts.index : [opts.index as Label];
+      const dropPos = new Set(labelPositions(labels as Label[], out.index));
+      out = out.take(Array.from({ length: out.length }, (_, i) => i).filter((i) => !dropPos.has(i)));
+    }
+    return out;
+  }
+
+  rename(options: { columns?: Record<string, string> | ((c: string) => string); index?: Record<string, Label> | ((l: Label) => Label) }): DataFrame {
+    let cols = this._cols;
+    if (options.columns) {
+      const m = options.columns;
+      const f = typeof m === 'function' ? m : (c: string) => m[c] ?? c;
+      cols = new Map([...this._cols].map(([k, v]) => [f(k), v]));
+    }
+    let index = this.index;
+    if (options.index) {
+      const m = options.index;
+      const f = typeof m === 'function' ? m : (l: Label) => (Object.hasOwn(m, String(l)) ? m[String(l)] : l);
+      index = new Index(this.index.labels.map(f), { name: this.index.name, names: this.index.names });
+    }
+    return this.with(cols, index);
+  }
+
+  /** Conforms to new row labels and/or columns, filling holes with NA (or `fillValue`). */
+  reindex(options: { index?: readonly Label[] | Index; columns?: readonly string[]; fillValue?: unknown }): DataFrame {
+    let out: DataFrame = this;
+    if (options.index) {
+      const idx = options.index instanceof Index ? options.index : new Index([...options.index], { name: this.index.name });
+      const cols = new Map<string, Column>();
+      for (const name of out._cols.keys()) cols.set(name, out.get(name).reindex(idx, options.fillValue ?? null)._col);
+      out = this.with(cols, idx);
+    }
+    if (options.columns) {
+      out = this.with(new Map(options.columns.map((c) => [c, out._cols.get(c) ?? Column.full(out.length, options.fillValue ?? null)])), out.index);
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------------ indexes
+
+  /** Uses one or more columns as the index. */
+  setIndex(keys: string | readonly string[], options: { drop?: boolean } = {}): DataFrame {
+    const names = typeof keys === 'string' ? [keys] : [...keys];
+    const cols = names.map((n) => this._column(n));
+    const index = names.length === 1
+      ? new Index(cols[0].toArray() as Label[], { name: names[0] })
+      : new Index(Array.from({ length: this.length }, (_, i) => cols.map((c) => c.get(i) as Label)), { names });
+    const drop = options.drop ?? true;
+    return this.with(drop ? new Map([...this._cols].filter(([k]) => !names.includes(k))) : new Map(this._cols), index);
+  }
+
+  /** Moves the index into column(s) and restores a default 0..n-1 index. */
+  resetIndex(options: { drop?: boolean } = {}): DataFrame {
+    const range = Index.range(this.length);
+    if (options.drop) return this.with(new Map(this._cols), range);
+    const cols = new Map<string, Column>();
+    if (this.index.nlevels > 1) {
+      this.index.names!.forEach((name, l) => {
+        cols.set(name ?? `level_${l}`, Column.from(this.index.labels.map((t) => (t as readonly Label[])[l])));
+      });
+    } else {
+      const name = this.index.name ?? (this._cols.has('index') ? 'level_0' : 'index');
+      cols.set(name, Column.from(this.index.labels));
+    }
+    for (const [k, v] of this._cols) cols.set(k, v);
+    return this.with(cols, range);
+  }
+
+  // -------------------------------------------------------------- aggregation
+
+  private reduce(agg: AggName, options: AxisAggOptions = {}): Series {
+    const numericOnly = options.numericOnly ?? NUMERIC_AGGS.has(agg);
+    const names = this.columns.filter((c) => !numericOnly || isNumericDType(this._cols.get(c)!.dtype));
+    if (isAxis1(options.axis)) {
+      const sub = this.get(names);
+      const rowCol = (i: number) => Column.from(names.map((n) => sub._cols.get(n)!.get(i)));
+      const out = Array.from({ length: this.length }, (_, i) => aggregate(rowCol(i), agg, null, options));
+      return new Series(out, { index: this.index });
+    }
+    const vals = names.map((n) => aggregate(this._cols.get(n)!, agg, null, options));
+    return new Series(vals, { index: names });
+  }
+
+  sum(options?: AxisAggOptions): Series { return this.reduce('sum', options); }
+  prod(options?: AxisAggOptions): Series { return this.reduce('prod', options); }
+  mean(options?: AxisAggOptions): Series { return this.reduce('mean', options); }
+  median(options?: AxisAggOptions): Series { return this.reduce('median', options); }
+  std(options?: AxisAggOptions): Series { return this.reduce('std', options); }
+  var(options?: AxisAggOptions): Series { return this.reduce('var', options); }
+  min(options?: AxisAggOptions): Series { return this.reduce('min', options); }
+  max(options?: AxisAggOptions): Series { return this.reduce('max', options); }
+  count(options?: AxisAggOptions): Series { return this.reduce('count', options); }
+  nunique(options?: AxisAggOptions): Series { return this.reduce('nunique', options); }
+
+  quantile(q = 0.5): Series {
+    const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
+    return new Series(names.map((n) => quantile(this._cols.get(n)!, q)), { index: names, name: String(q) });
+  }
+
+  idxmax(): Series {
+    const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
+    return new Series(names.map((n) => this.get(n).idxmax()), { index: names });
+  }
+
+  idxmin(): Series {
+    const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
+    return new Series(names.map((n) => this.get(n).idxmin()), { index: names });
+  }
+
+  /**
+   * Aggregates columns. `func` may be a name/function (→ Series), a list
+   * (→ DataFrame with one row per aggregation) or `{column: func | func[]}`.
+   */
+  agg(func: AggFn): Series;
+  agg(func: readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): DataFrame;
+  agg(func: AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): Series | DataFrame {
+    const label = (f: AggFn, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
+    const apply = (name: string, f: AggFn) => (typeof f === 'function' ? f(this.get(name)) : aggregate(this._column(name), f));
+    if (typeof func === 'string' || typeof func === 'function') {
+      if (typeof func === 'string') return this.reduce(func);
+      return new Series(this.columns.map((c) => func(this.get(c))), { index: this.columns });
+    }
+    const spec: [string, readonly AggFn[]][] = Array.isArray(func)
+      ? this.columns.filter((c) => !func.some((f: AggFn) => typeof f === 'string' && NUMERIC_AGGS.has(f)) || isNumericDType(this._cols.get(c)!.dtype)).map((c) => [c, func as readonly AggFn[]])
+      : Object.entries(func as Record<string, AggFn | readonly AggFn[]>).map(([c, f]) => [c, Array.isArray(f) ? f : [f as AggFn]]);
+    const rowLabels: string[] = [];
+    for (const [, fs] of spec) fs.forEach((f, i) => { const l = label(f, i); if (!rowLabels.includes(l)) rowLabels.push(l); });
+    const cols = new Map<string, Column>();
+    for (const [c, fs] of spec) {
+      const vals = rowLabels.map((l) => {
+        const k = fs.findIndex((f, i) => label(f, i) === l);
+        return k < 0 ? null : apply(c, fs[k]);
+      });
+      cols.set(c, Column.from(vals));
+    }
+    return this.with(cols, new Index(rowLabels));
+  }
+
+  /** Summary statistics of numeric columns (or all columns with `include: 'all'`). */
+  describe(options: { include?: 'all' } = {}): DataFrame {
+    const numeric = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
+    const names = options.include === 'all' || numeric.length === 0 ? this.columns : numeric;
+    const parts = names.map((n) => this.get(n).describe());
+    const labels: Label[] = [];
+    for (const p of parts) for (const l of p.index.labels) if (!labels.includes(l)) labels.push(l);
+    const cols = new Map<string, Column>();
+    names.forEach((n, j) => cols.set(n, parts[j].reindex(labels)._col));
+    return this.with(cols, new Index(labels));
+  }
+
+  /** Pairwise Pearson correlation of numeric columns. */
+  corr(): DataFrame {
+    return this.pairwise((x, y) => {
+      const { sxy, sxx, syy } = moments(x, y);
+      return sxy / Math.sqrt(sxx * syy);
+    });
+  }
+
+  /** Pairwise sample covariance of numeric columns. */
+  cov(): DataFrame {
+    return this.pairwise((x, y) => {
+      const { n, sxy } = moments(x, y);
+      return n > 1 ? sxy / (n - 1) : NaN;
+    });
+  }
+
+  private pairwise(fn: (x: ArrayLike<number>, y: ArrayLike<number>) => number): DataFrame {
+    const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
+    const data = names.map((n) => this._cols.get(n)!.data as ArrayLike<number>);
+    const cols = new Map<string, Column>();
+    names.forEach((n, j) => cols.set(n, new Column('float64', Float64Array.from(names.map((_, i) => fn(data[i], data[j]))))));
+    return this.with(cols, new Index(names));
+  }
+
+  // ---------------------------------------------------------------- transform
+
+  /** Applies a Series → Series transform to every column (non-numeric ones are kept when `numericOnly`). */
+  private mapColumns(fn: (s: Series) => Series, numericOnly = false): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const [k, c] of this._cols) {
+      cols.set(k, numericOnly && !isNumericDType(c.dtype) ? c : fn(Series._from(c, this.index, k))._col);
+    }
+    return this.with(cols);
+  }
+
+  cumsum(): DataFrame { return this.mapColumns((s) => s.cumsum(), true); }
+  cumprod(): DataFrame { return this.mapColumns((s) => s.cumprod(), true); }
+  cummax(): DataFrame { return this.mapColumns((s) => s.cummax(), true); }
+  cummin(): DataFrame { return this.mapColumns((s) => s.cummin(), true); }
+  abs(): DataFrame { return this.mapColumns((s) => s.abs(), true); }
+  round(decimals = 0): DataFrame { return this.mapColumns((s) => s.round(decimals), true); }
+  clip(lower?: number | null, upper?: number | null): DataFrame { return this.mapColumns((s) => s.clip(lower, upper), true); }
+  shift(periods = 1): DataFrame { return this.mapColumns((s) => s.shift(periods)); }
+  diff(periods = 1): DataFrame { return this.mapColumns((s) => s.diff(periods), true); }
+  pctChange(periods = 1): DataFrame { return this.mapColumns((s) => s.pctChange(periods), true); }
+  rank(options: { ascending?: boolean } = {}): DataFrame { return this.mapColumns((s) => s.rank(options)); }
+
+  /**
+   * `axis: 0` (default) calls `fn(series, column)` per column; `axis: 1` calls
+   * `fn(row, label)` per row with a plain object. Scalar results become a Series;
+   * Series / object results become a DataFrame.
+   */
+  apply(fn: (s: Series, column: string) => unknown, options?: { axis?: 0 | 'index' }): Series | DataFrame;
+  apply(fn: (row: Record<string, unknown>, label: Label) => unknown, options: { axis: 1 | 'columns' }): Series | DataFrame;
+  apply(fn: (x: any, key: any) => unknown, options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): Series | DataFrame {
+    if (isAxis1(options.axis)) {
+      const results: unknown[] = [];
+      for (const [label, row] of this.iterrows()) results.push(fn(row, label));
+      if (results.length && results.every((r) => isPlainObject(r))) {
+        return new DataFrame(results as Record<string, unknown>[], { index: this.index });
+      }
+      return new Series(results, { index: this.index });
+    }
+    const names = this.columns;
+    const results = names.map((n) => fn(this.get(n), n));
+    if (results.length && results.every((r) => r instanceof Series)) {
+      const cols = new Map<string, Column>();
+      names.forEach((n, j) => cols.set(n, (results[j] as Series)._col));
+      return this.with(cols, (results[0] as Series).index);
+    }
+    return new Series(results, { index: names });
+  }
+
+  /** Element-wise function over every cell (pandas `DataFrame.map`, formerly `applymap`). */
+  map(fn: (value: unknown) => unknown): DataFrame {
+    return this.mapColumns((s) => s.map((v) => fn(v)));
+  }
+
+  applymap(fn: (value: unknown) => unknown): DataFrame {
+    return this.map(fn);
+  }
+
+  astype(dtype: DType | Record<string, DType>): DataFrame {
+    const cols = new Map<string, Column>();
+    for (const [k, c] of this._cols) {
+      const d = typeof dtype === 'string' ? dtype : dtype[k];
+      cols.set(k, d ? c.astype(d) : c);
+    }
+    return this.with(cols);
+  }
+
+  replace(from: unknown, to?: unknown): DataFrame {
+    return this.mapColumns((s) => s.replace(from, to));
+  }
+
+  isin(values: Iterable<unknown> | Record<string, Iterable<unknown>>): DataFrame {
+    if (isPlainObject(values)) {
+      const m = values as Record<string, Iterable<unknown>>;
+      return this.mapColumns((s) => (m[s.name!] ? s.isin(m[s.name!]) : new Series(Column.full(s.length, false, 'bool'), { index: s.index })));
+    }
+    const list = [...(values as Iterable<unknown>)];
+    return this.mapColumns((s) => s.isin(list));
+  }
+
+  /** Keeps cells where `cond` holds; the rest become `other`. */
+  where(cond: DataFrame | ((df: DataFrame) => DataFrame), other: unknown = null): DataFrame {
+    const c = typeof cond === 'function' ? cond(this) : cond;
+    return this.mapColumns((s) => (c.has(s.name!) ? s.where(c.get(s.name!), other) : s.map(() => other)));
+  }
+
+  mask(cond: DataFrame | ((df: DataFrame) => DataFrame), other: unknown = null): DataFrame {
+    const c = typeof cond === 'function' ? cond(this) : cond;
+    return this.mapColumns((s) => (c.has(s.name!) ? s.mask(c.get(s.name!), other) : s));
+  }
+
+  // ------------------------------------------------------------ missing data
+
+  isna(): DataFrame { return this.mapColumns((s) => s.isna()); }
+  notna(): DataFrame { return this.mapColumns((s) => s.notna()); }
+  isnull(): DataFrame { return this.isna(); }
+  notnull(): DataFrame { return this.notna(); }
+
+  /** Fills NA with a scalar, or per column with `{column: value}`. */
+  fillna(value: unknown): DataFrame {
+    if (isPlainObject(value)) {
+      const m = value as Record<string, unknown>;
+      return this.mapColumns((s) => (Object.hasOwn(m, s.name!) ? s.fillna(m[s.name!]) : s));
+    }
+    return this.mapColumns((s) => s.fillna(value));
+  }
+
+  ffill(limit?: number): DataFrame { return this.mapColumns((s) => s.ffill(limit)); }
+  bfill(limit?: number): DataFrame { return this.mapColumns((s) => s.bfill(limit)); }
+  interpolate(): DataFrame { return this.mapColumns((s) => s.interpolate(), true); }
+
+  /**
+   * Drops rows (axis 0) or columns (axis 1) with missing values.
+   * `how: 'any'` (default) or `'all'`; `thresh` keeps rows with at least that many non-NA values.
+   */
+  dropna(options: { axis?: 0 | 1 | 'index' | 'columns'; how?: 'any' | 'all'; thresh?: number; subset?: readonly string[] } = {}): DataFrame {
+    const how = options.how ?? 'any';
+    if (isAxis1(options.axis)) {
+      const keep = this.columns.filter((c) => {
+        const col = this._cols.get(c)!;
+        let valid = 0;
+        for (let i = 0; i < col.length; i++) if (!col.isNA(i)) valid++;
+        if (options.thresh !== undefined) return valid >= options.thresh;
+        return how === 'any' ? valid === col.length : valid > 0;
+      });
+      return this.get(keep);
+    }
+    const cols = (options.subset ?? this.columns).map((c) => this._column(c));
+    const pos: number[] = [];
+    for (let i = 0; i < this.length; i++) {
+      let valid = 0;
+      for (const c of cols) if (!c.isNA(i)) valid++;
+      const keep = options.thresh !== undefined ? valid >= options.thresh : how === 'any' ? valid === cols.length : valid > 0;
+      if (keep) pos.push(i);
+    }
+    return pos.length === this.length ? this : this.take(pos);
+  }
+
+  // ------------------------------------------------------------------ sorting
+
+  sortValues(by: string | readonly string[], options: { ascending?: boolean | readonly boolean[]; naPosition?: NaPosition } = {}): DataFrame {
+    const names = typeof by === 'string' ? [by] : by;
+    const asc = options.ascending ?? true;
+    const keys = names.map((n, i) => sortKeyFromColumn(this._column(n), typeof asc === 'boolean' ? asc : asc[i] ?? true));
+    return this.take(argsort(keys, this.length, options.naPosition));
+  }
+
+  sortIndex(options: { ascending?: boolean } = {}): DataFrame {
+    const key = sortKeyFromColumn(Column.from(this.index.labels, 'object'), options.ascending ?? true);
+    return this.take(argsort([key], this.length));
+  }
+
+  nlargest(n: number, columns: string | readonly string[]): DataFrame {
+    return this.dropna({ subset: typeof columns === 'string' ? [columns] : columns }).sortValues(columns, { ascending: false }).head(n);
+  }
+
+  nsmallest(n: number, columns: string | readonly string[]): DataFrame {
+    return this.dropna({ subset: typeof columns === 'string' ? [columns] : columns }).sortValues(columns, { ascending: true }).head(n);
+  }
+
+  // --------------------------------------------------------------- duplicates
+
+  duplicated(options: { subset?: string | readonly string[]; keep?: 'first' | 'last' | false } = {}): Series {
+    const names = options.subset === undefined ? this.columns : typeof options.subset === 'string' ? [options.subset] : options.subset;
+    const flags = duplicatedFlags(names.map((n) => this._column(n)), this.length, options.keep ?? 'first');
+    return Series._from(new Column('bool', flags), this.index, null);
+  }
+
+  dropDuplicates(options: { subset?: string | readonly string[]; keep?: 'first' | 'last' | false; ignoreIndex?: boolean } = {}): DataFrame {
+    const out = this.loc(this.duplicated(options).not());
+    return options.ignoreIndex ? out.resetIndex({ drop: true }) : out;
+  }
+
+  /** Counts of unique rows (over `subset` columns), most frequent first. */
+  valueCounts(options: { subset?: readonly string[]; normalize?: boolean; ascending?: boolean } = {}): Series {
+    const subset = options.subset ?? this.columns;
+    let s = this.groupby([...subset]).size().sortValues({ ascending: options.ascending ?? false });
+    if (options.normalize) s = s.div(this.length).rename('proportion');
+    else s = s.rename('count');
+    return s;
+  }
+
+  // ---------------------------------------------------------- group / combine
+
+  groupby(by: string | readonly string[], options: GroupByOptions = {}): DataFrameGroupBy {
+    const keys = typeof by === 'string' ? [by] : [...by];
+    for (const k of keys) this._column(k);
+    return new DataFrameGroupBy(this, keys, options);
+  }
+
+  merge(right: DataFrame, options: MergeOptions = {}): DataFrame {
+    return merge(this, right, options);
+  }
+
+  /** Joins columns of `other` on the index. */
+  join(other: DataFrame | Series, options: { how?: 'left' | 'right' | 'inner' | 'outer'; lsuffix?: string; rsuffix?: string } = {}): DataFrame {
+    const right = other instanceof Series ? other.toFrame() : other;
+    const how = options.how ?? 'left';
+    let index: Index;
+    if (how === 'left') index = this.index;
+    else if (how === 'right') index = right.index;
+    else if (how === 'inner') index = new Index(this.index.labels.filter((l) => right.index.has(l)), { name: this.index.name });
+    else index = this.index.equals(right.index) ? this.index : this.index.union(right.index);
+    const l = index === this.index ? this : this.reindex({ index });
+    const r = index === right.index ? right : right.reindex({ index });
+    const cols = new Map<string, Column>();
+    const overlap = new Set(l.columns.filter((c) => r.has(c)));
+    if (overlap.size && !options.lsuffix && !options.rsuffix) {
+      throw new Error(`columns overlap but no suffix specified: ${[...overlap].join(', ')}`);
+    }
+    for (const [k, c] of l._cols) cols.set(overlap.has(k) ? k + (options.lsuffix ?? '') : k, c);
+    for (const [k, c] of r._cols) cols.set(overlap.has(k) ? k + (options.rsuffix ?? '') : k, c);
+    return this.with(cols, index);
+  }
+
+  /** Unpivots wide → long (`id_vars` kept, other columns stacked into variable/value). */
+  melt(options: { idVars?: readonly string[]; valueVars?: readonly string[]; varName?: string; valueName?: string } = {}): DataFrame {
+    const idVars = options.idVars ?? [];
+    const valueVars = options.valueVars ?? this.columns.filter((c) => !idVars.includes(c));
+    const n = this.length;
+    const positions = Array.from({ length: n * valueVars.length }, (_, i) => i % n);
+    const cols = new Map<string, Column>();
+    for (const id of idVars) cols.set(id, this._column(id).take(positions));
+    cols.set(options.varName ?? 'variable', Column.from(valueVars.flatMap((v) => new Array(n).fill(v)), 'string'));
+    cols.set(options.valueName ?? 'value', Column.concat(valueVars.map((v) => this._column(v))));
+    return this.with(cols, Index.range(positions.length));
+  }
+
+  /**
+   * Spreads long → wide: one row per `index` value, one column per `columns` value,
+   * cells aggregated with `aggfunc` (default 'mean').
+   */
+  pivotTable(options: { index: string; columns: string; values: string; aggfunc?: AggName; fillValue?: unknown }): DataFrame {
+    const grouped = this.groupby([options.index, options.columns]).get(options.values).agg(options.aggfunc ?? 'mean') as Series;
+    const rowKeys: Label[] = [];
+    const colKeys: Label[] = [];
+    const seenR = new Set<unknown>(), seenC = new Set<unknown>();
+    for (const t of grouped.index.labels as readonly (readonly Label[])[]) {
+      if (!seenR.has(hashKey(t[0]))) { seenR.add(hashKey(t[0])); rowKeys.push(t[0]); }
+      if (!seenC.has(hashKey(t[1]))) { seenC.add(hashKey(t[1])); colKeys.push(t[1]); }
+    }
+    rowKeys.sort(compareValues);
+    colKeys.sort(compareValues);
+    const rowIdx = new Index(rowKeys, { name: options.index });
+    const cols = new Map<string, Column>();
+    for (const ck of colKeys) {
+      const vals = rowKeys.map((rk) => {
+        const v = grouped.get([rk, ck]);
+        return v === undefined ? (options.fillValue ?? null) : v;
+      });
+      cols.set(String(ck), Column.from(vals));
+    }
+    return this.with(cols, rowIdx);
+  }
+
+  // ------------------------------------------------------- element-wise operators
+
+  private binary(other: Operand | DataFrame, op: (a: Series, b: Operand) => Series): DataFrame {
+    if (other instanceof DataFrame) {
+      const index = this.index.equals(other.index) ? this.index : this.index.union(other.index);
+      const names = [...new Set([...this.columns, ...other.columns])].sort();
+      const l = this.reindex({ index, columns: names });
+      const r = other.reindex({ index, columns: names });
+      const cols = new Map<string, Column>();
+      for (const n of names) cols.set(n, op(l.get(n), r.get(n))._col);
+      return this.with(cols, index);
+    }
+    if (other instanceof Series) {
+      // Like pandas' default axis='columns': other's labels match column names.
+      const cols = new Map<string, Column>();
+      for (const n of this.columns) {
+        const v = other.get(n, null);
+        cols.set(n, op(this.get(n), v as Operand)._col);
+      }
+      return this.with(cols);
+    }
+    return this.mapColumns((s) => op(s, other));
+  }
+
+  add(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.add(b)); }
+  sub(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.sub(b)); }
+  mul(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.mul(b)); }
+  div(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.div(b)); }
+  mod(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.mod(b)); }
+  pow(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.pow(b)); }
+  eq(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.eq(b)); }
+  ne(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.ne(b)); }
+  lt(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.lt(b)); }
+  le(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.le(b)); }
+  gt(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.gt(b)); }
+  ge(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.ge(b)); }
+
+  // ------------------------------------------------------------------- output
+
+  copy(options: { deep?: boolean } = {}): DataFrame {
+    const deep = options.deep ?? true;
+    const cols = new Map<string, Column>();
+    for (const [k, c] of this._cols) cols.set(k, deep ? new Column(c.dtype, c.data.slice()) : c);
+    return this.with(cols);
+  }
+
+  equals(other: DataFrame): boolean {
+    if (!(other instanceof DataFrame) || !this.index.equals(other.index)) return false;
+    const a = this.columns, b = other.columns;
+    if (a.length !== b.length || a.some((c, i) => c !== b[i])) return false;
+    return a.every((c) => this.get(c).equals(other.get(c)));
+  }
+
+  /** Row records `[{col: value}, ...]` (pandas `to_dict('records')`). */
+  toRecords(): Record<string, unknown>[] {
+    return [...this.iterrows()].map(([, row]) => row);
+  }
+
+  toDict(orient: 'dict' | 'list' | 'records' | 'index' | 'series' = 'dict'): unknown {
+    switch (orient) {
+      case 'records': return this.toRecords();
+      case 'list': return Object.fromEntries(this.columns.map((c) => [c, this._cols.get(c)!.toArray()]));
+      case 'series': return Object.fromEntries(this.columns.map((c) => [c, this.get(c)]));
+      case 'index': return Object.fromEntries([...this.iterrows()].map(([l, r]) => [String(l), r]));
+      default: return Object.fromEntries(this.columns.map((c) => [c, this.get(c).toDict()]));
+    }
+  }
+
+  toJSON(): Record<string, unknown>[] {
+    return this.toRecords();
+  }
+
+  toCsv(path?: string, options: ToCsvOptions = {}): string {
+    return toCsv(this, path, options);
+  }
+
+  toJson(path?: string, options: { orient?: JsonOrient; indent?: number } = {}): string {
+    return toJson(this, path, options);
+  }
+
+  /** Concise summary: dtypes and non-null counts per column. */
+  info(): string {
+    const lines = ['<DataFrame>'];
+    const idx = this.index;
+    lines.push(idx.isDefault ? `RangeIndex: ${idx.length} entries, 0 to ${Math.max(0, idx.length - 1)}` : `Index: ${idx.length} entries`);
+    lines.push(`Data columns (total ${this._cols.size} columns):`);
+    const names = this.columns;
+    const rows = names.map((n, i) => [String(i).padStart(2), n, `${aggregate(this._cols.get(n)!, 'count')} non-null`, this._cols.get(n)!.dtype]);
+    lines.push(renderTable([' #', 'Column', 'Non-Null Count', 'Dtype'], [0, 1, 2, 3].map((j) => rows.map((r) => r[j])), 4));
+    const counts = new Map<string, number>();
+    for (const c of this._cols.values()) counts.set(c.dtype, (counts.get(c.dtype) ?? 0) + 1);
+    lines.push('dtypes: ' + [...counts].map(([d, n]) => `${d}(${n})`).join(', '));
+    return lines.join('\n');
+  }
+
+  toString(): string {
+    const [nrows, ncols] = this.shape;
+    if (ncols === 0 || nrows === 0) {
+      return `Empty DataFrame\nColumns: [${this.columns.join(', ')}]\nIndex: [${this.index.labels.map(String).join(', ')}]`;
+    }
+    const rowPos = displayPositions(nrows, DISPLAY.maxRows, DISPLAY.minRows);
+    const colPos = displayPositions(ncols, DISPLAY.maxColumns, DISPLAY.maxColumns);
+    const names = this.columns;
+    const idx = formatIndex(this.index, rowPos);
+    const header: string[] = idx.map(() => '');
+    const header2: string[] = this.index.nlevels > 1 ? this.index.names!.map((n) => n ?? '') : [this.index.name ?? ''];
+    const body: string[][] = [...idx];
+    for (const j of colPos) {
+      if (j === null) { header.push('...'); header2.push(''); body.push(rowPos.map(() => '...')); continue; }
+      header.push(names[j]);
+      header2.push('');
+      body.push(formatColumn(this._cols.get(names[j])!, rowPos));
+    }
+    let out = renderTable(header, body, idx.length, header2);
+    if (nrows > DISPLAY.maxRows || ncols > DISPLAY.maxColumns) out += `\n\n[${nrows} rows x ${ncols} columns]`;
+    return out;
+  }
+
+  [Symbol.for('nodejs.util.inspect.custom')](): string {
+    return this.toString();
+  }
+}
+
+// ----------------------------------------------------------------- helpers
+
+function isArrayish(v: unknown): boolean {
+  return Array.isArray(v) || ArrayBuffer.isView(v) || v instanceof Column;
+}
+
+function unionKeys(rows: readonly Record<string, unknown>[]): string[] {
+  const seen = new Set<string>();
+  for (const r of rows) if (r) for (const k of Object.keys(r)) seen.add(k);
+  return [...seen];
+}
+
+function labelName(l: Label): string | null {
+  return l === null ? null : String(l);
+}
+
+/** Turns a Series (aligned on `index`), array or scalar (broadcast) into a column. */
+function toColumn(v: unknown, index: Index, dtype?: DType): Column {
+  if (v instanceof Series) {
+    const s = v.index.equals(index) ? v : v.reindex(index);
+    return dtype ? s._col.astype(dtype) : s._col;
+  }
+  if (isArrayish(v)) {
+    const col = Column.from(v as ArrayLike<unknown>, dtype);
+    if (col.length !== index.length) throw new RangeError(`Length of values (${col.length}) does not match length of index (${index.length})`);
+    return col;
+  }
+  return Column.full(index.length, v, dtype);
+}
+
+function moments(x: ArrayLike<number>, y: ArrayLike<number>) {
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < x.length; i++) {
+    if (Number.isNaN(x[i]) || Number.isNaN(y[i])) continue;
+    n++; sx += x[i]; sy += y[i];
+  }
+  const mx = sx / n, my = sy / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < x.length; i++) {
+    if (Number.isNaN(x[i]) || Number.isNaN(y[i])) continue;
+    sxy += (x[i] - mx) * (y[i] - my);
+    sxx += (x[i] - mx) ** 2;
+    syy += (y[i] - my) ** 2;
+  }
+  return { n, mx, my, sxy, sxx, syy };
+}
+
