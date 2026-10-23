@@ -2,12 +2,14 @@ name: Publish to npm
 
 # Run manually from the Actions tab ("Run workflow").
 # Publishes the version in package.json and fails if that version is already on npm.
+# Authenticates with npm Trusted Publishing (OIDC): no token or secret is needed, but the
+# package must list this repository and workflow (publish.yml) as its trusted publisher on npmjs.com.
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write # npm provenance
+  id-token: write # OIDC token for npm Trusted Publishing (and provenance)
 
 concurrency:
   group: npm-publish
@@ -24,6 +26,13 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: npm
+
+      - name: Ensure npm supports Trusted Publishing (>= 11.5.1)
+        run: |
+          if ! node -e "const [a,b,c]=process.argv[1].split('.').map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$(npm --version)"; then
+            npm install -g npm@^11.5.1
+          fi
+          npm --version
 
       - name: Read package name and version
         id: pkg
@@ -49,10 +58,8 @@ jobs:
       - run: npm run build
 
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        # Checks already ran above, so skip prepublishOnly.
-        run: npm publish --provenance --access public --ignore-scripts
+        # Trusted Publishing signs provenance automatically. Checks already ran, so skip prepublishOnly.
+        run: npm publish --access public --ignore-scripts
 
       - name: Summary
         run: echo "Published ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }} → https://www.npmjs.com/package/${{ steps.pkg.outputs.name }}" >> "$GITHUB_STEP_SUMMARY"
