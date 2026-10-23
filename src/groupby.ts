@@ -3,7 +3,7 @@ import { Column } from './core/column.ts';
 import { Index } from './core/indexes.ts';
 import { isNumericDType, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
 import { compareValues, hashKey, isNA } from './core/values.ts';
-import { DataFrame } from './frame.ts';
+import { colKey, DataFrame } from './frame.ts';
 import { concat } from './reshape.ts';
 import { samplePositions, Series } from './series.ts';
 import type { RankOptions } from './core/stats.ts';
@@ -34,7 +34,7 @@ interface Groups {
   rows: number[][];
 }
 
-function computeGroups(keyCols: readonly Column[], n: number, sort: boolean, dropna: boolean): Groups {
+export function computeGroups(keyCols: readonly Column[], n: number, sort: boolean, dropna: boolean): Groups {
   const ids = new Map<unknown, number>();
   const keys: Label[][] = [];
   const rows: number[][] = [];
@@ -199,14 +199,16 @@ export abstract class BaseGroupBy {
   }
 
   /** @internal Wraps per-group result columns as a frame indexed (or prefixed) by group keys. */
-  _wrap(cols: Map<string, Column>): DataFrame {
-    if (this.options.asIndex) return DataFrame._fromColumns(cols, this._keyIndex());
+  _wrap(cols: Map<string, Column>, colNames: readonly (string | null)[] | null = null): DataFrame {
+    if (this.options.asIndex) return DataFrame._fromColumns(cols, this._keyIndex(), colNames);
     const out = new Map<string, Column>();
+    const levels = colNames?.length ?? 1;
     this._keyNames.forEach((name, l) => {
-      out.set(name ?? `level_${l}`, Column.from(this._groups.keys.map((k) => k[l])));
+      const label = name ?? `level_${l}`;
+      out.set(levels > 1 ? colKey([label, ...new Array(levels - 1).fill('')]) : label, Column.from(this._groups.keys.map((k) => k[l])));
     });
     for (const [k, v] of cols) out.set(k, v);
-    return DataFrame._fromColumns(out, Index.range(this.ngroups));
+    return DataFrame._fromColumns(out, Index.range(this.ngroups), colNames);
   }
 
   protected positionsWhere(fn: (rows: number[], g: number) => number[]): number[] {
@@ -298,25 +300,30 @@ export class DataFrameGroupBy extends BaseGroupBy {
     const cols = new Map<string, Column>();
     const add = (out: string, col: string, f: AggFn) => cols.set(out, this._aggColumn(this._frame._column(col), f, col));
 
+    // Lists of functions give MultiIndex columns (column, func), like pandas.
+    let multi = false;
     if (typeof spec === 'function') {
       for (const c of this.valueColumns()) add(c, c, spec);
     } else if (Array.isArray(spec)) {
+      multi = true;
       for (const c of this.valueColumns()) {
         const dtype = this._frame._column(c).dtype;
         (spec as readonly AggFn[]).forEach((f, i) => {
           if (typeof f === 'string' && NUMERIC_AGGS.has(f) && !isNumericDType(dtype)) return;
-          add(`${c}_${label(f, i)}`, c, f);
+          add(colKey([c, label(f, i)]), c, f);
         });
       }
     } else {
-      for (const [key, v] of Object.entries(spec as Record<string, AggFn | readonly AggFn[] | readonly [string, AggFn]>)) {
-        const named = Array.isArray(v) && v.length === 2 && typeof v[0] === 'string' && this._frame.has(v[0]) && !this._frame.has(key);
-        if (named) add(key, v[0] as string, v[1] as AggFn);
-        else if (Array.isArray(v)) (v as readonly AggFn[]).forEach((f, i) => add(`${key}_${label(f, i)}`, key, f));
-        else add(key, key, v as AggFn);
+      const entries = Object.entries(spec as Record<string, AggFn | readonly AggFn[] | readonly [string, AggFn]>);
+      const isNamed = (key: string, v: unknown) => Array.isArray(v) && v.length === 2 && typeof v[0] === 'string' && this._frame.has(v[0]) && !this._frame.has(key);
+      multi = entries.some(([k, v]) => Array.isArray(v) && !isNamed(k, v));
+      for (const [key, v] of entries) {
+        if (isNamed(key, v)) add(key, (v as readonly [string, AggFn])[0], (v as readonly [string, AggFn])[1]);
+        else if (Array.isArray(v)) (v as readonly AggFn[]).forEach((f, i) => add(colKey([key, label(f, i)]), key, f));
+        else add(multi ? colKey([key, label(v as AggFn, 0)]) : key, key, v as AggFn);
       }
     }
-    return this._wrap(cols);
+    return this._wrap(cols, multi ? [null, null] : null);
   }
 
   aggregate(spec: AggSpec): DataFrame {
@@ -428,9 +435,9 @@ export class DataFrameGroupBy extends BaseGroupBy {
     for (const name of this.valueColumns()) {
       if (!isNumericDType(this._frame._column(name).dtype)) continue;
       const d = this.get(name).describe();
-      for (const stat of d.columns) cols.set(`${name}_${stat}`, d._column(stat));
+      for (const stat of d.columns) cols.set(colKey([name, stat]), d._column(stat));
     }
-    return DataFrame._fromColumns(cols, this.options.asIndex ? this._keyIndex() : Index.range(this.ngroups));
+    return DataFrame._fromColumns(cols, this.options.asIndex ? this._keyIndex() : Index.range(this.ngroups), [null, null]);
   }
 
   getGroup(key: Label): DataFrame {

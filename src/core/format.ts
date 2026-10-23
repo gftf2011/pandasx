@@ -1,6 +1,7 @@
 import type { Column } from './column.ts';
 import type { Index } from './indexes.ts';
 import { Period, Timedelta } from './time.ts';
+import { Interval } from './interval.ts';
 import { formatOffset, tzOffset } from './tz.ts';
 import { NULLABLE_DTYPES, type Label } from './types.ts';
 
@@ -33,7 +34,7 @@ export function formatScalar(v: unknown): string {
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? 'NaT' : v.toISOString();
   if (typeof v === 'string') return v;
   if (Array.isArray(v)) return '(' + v.map(formatScalar).join(', ') + ')';
-  if (v instanceof Timedelta || v instanceof Period) return v.toString();
+  if (v instanceof Timedelta || v instanceof Period || v instanceof Interval) return v.toString();
   if (typeof v === 'object') return JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? x.toString() : x));
   return String(v);
 }
@@ -103,14 +104,14 @@ function formatLabel(l: Label, tz: string | null = null): string {
 
 /**
  * Renders a text table. `left` columns (the index) are left-aligned and all
- * others right-aligned, like pandas.
+ * others right-aligned, like pandas. Header rows that are entirely blank are skipped.
  */
-export function renderTable(header: string[] | null, columns: string[][], leftCount: number, headerRow2?: string[]): string {
-  const widths = columns.map((c, j) => Math.max(header?.[j].length ?? 0, headerRow2?.[j].length ?? 0, ...c.map((s) => s.length)));
+export function renderTable(headers: readonly (readonly string[])[] | null, columns: string[][], leftCount: number): string {
+  const rows = (headers ?? []).filter((h) => h.some((c) => c !== ''));
+  const widths = columns.map((c, j) => Math.max(...rows.map((h) => h[j]?.length ?? 0), ...c.map((s) => s.length), 0));
   const pad = (s: string, j: number) => (j < leftCount ? s.padEnd(widths[j]) : s.padStart(widths[j]));
-  const line = (cells: string[]) => cells.map(pad).join('  ').trimEnd();
-  const lines = header ? [line(header)] : [];
-  if (headerRow2 && headerRow2.some((s) => s !== '')) lines.push(line(headerRow2));
+  const line = (cells: readonly string[]) => cells.map(pad).join('  ').trimEnd();
+  const lines = rows.map(line);
   const nrows = columns[0]?.length ?? 0;
   for (let i = 0; i < nrows; i++) lines.push(line(columns.map((c) => c[i])));
   return lines.join('\n');

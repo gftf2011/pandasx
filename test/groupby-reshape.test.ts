@@ -46,8 +46,10 @@ describe('groupby', () => {
   it('agg: per-column, list and named', () => {
     const g = sales().groupby('region');
     const r = g.agg({ units: 'sum', price: ['min', 'max'] });
-    assert.deepEqual(r.columns, ['units', 'price_min', 'price_max']);
-    assert.deepEqual(r.get('price_max').toArray(), [3, 2]);
+    assert.deepEqual(r.columnIndex.toArray(), [['units', 'sum'], ['price', 'min'], ['price', 'max']]);
+    assert.deepEqual(r.column(['price', 'max']).toArray(), [3, 2]);
+    assert.deepEqual((r.get('price') as unknown as DataFrame).columns, ['min', 'max']);
+    assert.deepEqual(r.flattenColumns().columns, ['units_sum', 'price_min', 'price_max']);
     const named = g.agg({ total: ['units', 'sum'], avg_price: ['price', 'mean'] });
     assert.deepEqual(named.columns, ['total', 'avg_price']);
     const custom = g.get('units').agg((s) => s.max() as number - (s.min() as number));

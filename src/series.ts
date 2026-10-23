@@ -6,6 +6,9 @@ import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
 import { correlation, covariance, interpolate, kurtosis, rankPositions, skewness, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
 import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from './window.ts';
 import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
+import { onAxis, unstack, xs } from './levels.ts';
+import { combineFirst, compare, explodeSeries, update } from './combine.ts';
+
 import { atTimePositions, betweenTimePositions, shiftIndex, toPeriodIndex, toTimestampIndex, truncatePositions, tzConvertIndex, tzLocalizeIndex } from './timeindex.ts';
 import type { Ambiguous, Nonexistent } from './core/tz.ts';
 
@@ -72,22 +75,47 @@ export function maskPositions(mask: Mask, index: Index): number[] {
   return out;
 }
 
+/**
+ * Resolves a label-based row key. On a MultiIndex a scalar or a shorter tuple
+ * selects by prefix (`drop` = levels matched, which pandas removes from the
+ * result); a full tuple is a scalar key; an array of tuples selects several.
+ */
+export function resolveRows(key: RowSelector, index: Index): { pos: number[]; scalar: boolean; drop: number } {
+  if (key instanceof Slice) return { pos: key.labelPositions(index), scalar: false, drop: 0 };
+  if (isMask(key)) return { pos: maskPositions(key, index), scalar: false, drop: 0 };
+  const multi = index.isMulti;
+  const find = (l: Label): number[] => {
+    if (multi) {
+      const prefix = Array.isArray(l) ? (l as readonly Label[]) : [l];
+      const locs = index.getLocPrefix(prefix);
+      if (locs.length === 0) throw new KeyError(l);
+      return locs;
+    }
+    const locs = index.getLoc(l);
+    if (locs.length === 0) throw new KeyError(l);
+    return [...locs];
+  };
+  if (Array.isArray(key)) {
+    if (multi && !Array.isArray(key[0])) {
+      const pos = find(key as readonly Label[]);
+      const full = key.length === index.nlevels;
+      return { pos, scalar: full, drop: full ? 0 : key.length };
+    }
+    return { pos: (key as readonly Label[]).flatMap(find), scalar: false, drop: 0 };
+  }
+  if (multi) return { pos: find(key as Label), scalar: false, drop: 1 };
+  return { pos: find(key as Label), scalar: true, drop: 0 };
+}
+
 /** Row positions selected by a label-based key. */
 export function labelPositions(key: RowSelector, index: Index): number[] {
-  if (key instanceof Slice) return key.labelPositions(index);
-  if (isMask(key)) return maskPositions(key, index);
-  if (Array.isArray(key) && !(index.nlevels > 1 && !Array.isArray(key[0]))) {
-    const out: number[] = [];
-    for (const l of key as readonly Label[]) {
-      const locs = index.getLoc(l);
-      if (locs.length === 0) throw new KeyError(l);
-      out.push(...locs);
-    }
-    return out;
-  }
-  const locs = index.getLoc(key as Label);
-  if (locs.length === 0) throw new KeyError(key);
-  return [...locs];
+  return resolveRows(key, index).pos;
+}
+
+/** Drops the first `drop` levels of a MultiIndex selection, as pandas does for partial keys. */
+export function dropMatchedLevels(index: Index, drop: number): Index {
+  if (drop <= 0 || !index.isMulti || drop >= index.nlevels) return index;
+  return index.droplevel(Array.from({ length: drop }, (_, l) => l));
 }
 
 /** Row positions selected by a position-based key. */
@@ -266,9 +294,10 @@ export class Series {
   loc(key: Label): unknown;
   loc(key: RowSelector | ((s: Series) => Mask)): unknown {
     if (typeof key === 'function') return this.loc(key(this));
-    const scalar = !(key instanceof Slice) && !isMask(key) && !(Array.isArray(key) && !(this.index.nlevels > 1 && !Array.isArray(key[0])));
-    const pos = labelPositions(key, this.index);
-    return scalar && pos.length === 1 ? this._col.get(pos[0]) : this.take(pos);
+    const { pos, scalar, drop } = resolveRows(key, this.index);
+    if (scalar && pos.length === 1) return this._col.get(pos[0]);
+    const out = this.take(pos);
+    return drop ? out.with(out._col, dropMatchedLevels(out.index, drop)) : out;
   }
 
   /** Position-based selection: integer, integers, boolean mask, slice (exclusive) or callable. */
@@ -839,7 +868,7 @@ export class Series {
   rfloordiv(other: Operand): Series { return this.arith('floordiv', other, true); }
   neg(): Series { return this.mul(-1); }
 
-  private compare(op: string, other: Operand): Series {
+  private cmp(op: string, other: Operand): Series {
     const { left, right, scalar, index } = this._align(other);
     const test = CMP[op];
     const n = left.length;
@@ -868,12 +897,12 @@ export class Series {
     return new Series(new Column(nullable ? 'boolean' : 'bool', out), { index, name: this.name });
   }
 
-  eq(other: Operand): Series { return this.compare('eq', other); }
-  ne(other: Operand): Series { return this.compare('ne', other); }
-  lt(other: Operand): Series { return this.compare('lt', other); }
-  le(other: Operand): Series { return this.compare('le', other); }
-  gt(other: Operand): Series { return this.compare('gt', other); }
-  ge(other: Operand): Series { return this.compare('ge', other); }
+  eq(other: Operand): Series { return this.cmp('eq', other); }
+  ne(other: Operand): Series { return this.cmp('ne', other); }
+  lt(other: Operand): Series { return this.cmp('lt', other); }
+  le(other: Operand): Series { return this.cmp('le', other); }
+  gt(other: Operand): Series { return this.cmp('gt', other); }
+  ge(other: Operand): Series { return this.cmp('ge', other); }
 
   /** Boolean logic; with the nullable `boolean` dtype NA follows Kleene logic like pandas. */
   private logical(other: Operand, kind: 'and' | 'or' | 'xor'): Series {
@@ -984,6 +1013,52 @@ export class Series {
   }
 
 
+
+
+  /** One row per element of list-like values. */
+  explode(options: { ignoreIndex?: boolean } = {}): Series {
+    return explodeSeries(this, options.ignoreIndex);
+  }
+
+  combineFirst(other: Series): Series {
+    return combineFirst(this, other);
+  }
+
+  /** In-place update with the non-missing values of `other`. */
+  update(other: Series, options: { overwrite?: boolean } = {}): this {
+    update(this, other, options);
+    return this;
+  }
+
+  /** Differences with `other` as self/other columns. */
+  compare(other: Series, options: { keepShape?: boolean; keepEqual?: boolean; resultNames?: [string, string] } = {}): DataFrame {
+    return compare(this, other, options);
+  }
+
+  // ------------------------------------------------------------- MultiIndex
+
+  /** Cross-section at `key` of an index level (or of the columns with `axis: 1`). */
+  xs(key: Label, options: { level?: number | string | readonly (number | string)[]; axis?: 0 | 1 | 'index' | 'columns'; dropLevel?: boolean } = {}): unknown {
+    return xs(this, key, options);
+  }
+
+  /** Removes index level(s) (or column levels with `axis: 1`). */
+  droplevel(level: number | string | readonly (number | string)[], options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): Series {
+    return onAxis(this, options.axis, (i) => i.droplevel(level));
+  }
+
+  swaplevel(i: number | string = -2, j: number | string = -1, options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): Series {
+    return onAxis(this, options.axis, (x) => x.swaplevel(i, j));
+  }
+
+  reorderLevels(order: readonly (number | string)[], options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): Series {
+    return onAxis(this, options.axis, (x) => x.reorderLevels(order));
+  }
+
+  /** Pivots an index level into columns. */
+  unstack(options: { level?: number | string | readonly (number | string)[]; fillValue?: unknown } = {}): DataFrame {
+    return unstack(this, options) as DataFrame;
+  }
 
   // -------------------------------------------------------------- time series
 

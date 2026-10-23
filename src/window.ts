@@ -3,7 +3,7 @@ import { Column } from './core/column.ts';
 import { toOffset } from './core/offsets.ts';
 import { parseTimedelta, Timedelta } from './core/time.ts';
 import { isNumericDType } from './core/types.ts';
-import { DataFrame } from './frame.ts';
+import { colKey, DataFrame } from './frame.ts';
 import { numericView, Series } from './series.ts';
 
 export type WinType =
@@ -130,8 +130,8 @@ abstract class Window<T extends Target = Target> {
       return DataFrame._fromColumns(new Map(func.map((f, i) => [f, (results[i] as Series)._col])), this.target.index);
     }
     const cols = new Map<string, Column>();
-    for (const name of (results[0] as DataFrame).columns) func.forEach((f, i) => cols.set(`${name}_${f}`, (results[i] as DataFrame)._column(name)));
-    return DataFrame._fromColumns(cols, this.target.index);
+    for (const name of (results[0] as DataFrame).columns) func.forEach((f, i) => cols.set(colKey([name, f]), (results[i] as DataFrame)._column(name)));
+    return DataFrame._fromColumns(cols, this.target.index, [null, null]);
   }
 
   /** Rolling Pearson correlation with `other` (Series: pairwise per column). */

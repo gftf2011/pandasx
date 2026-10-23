@@ -1,5 +1,6 @@
 /** Helpers that operate on single JS values: missing detection, hashing and ordering. */
 import { Period, Timedelta } from './time.ts';
+import { Interval } from './interval.ts';
 
 export function isNA(v: unknown): boolean {
   if (v === null || v === undefined) return true;
@@ -19,6 +20,7 @@ export function hashKey(v: unknown): unknown {
   if (v instanceof Date) return '\u0000d' + v.getTime();
   if (v instanceof Timedelta) return '\u0000td' + v.ms;
   if (v instanceof Period) return '\u0000p' + v.freq + v.ordinal;
+  if (v instanceof Interval) return '\u0000i' + v.closed + v.left + ',' + v.right;
   if (Array.isArray(v)) return '\u0000t' + v.map(encodePart).join('\u0001');
   return v;
 }
@@ -41,6 +43,7 @@ export function compareValues(a: unknown, b: unknown): number {
   if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime();
   if (a instanceof Timedelta && b instanceof Timedelta) return a.ms - b.ms;
   if (a instanceof Period && b instanceof Period) return a.ordinal - b.ordinal;
+  if (a instanceof Interval && b instanceof Interval) return a.left - b.left || a.right - b.right;
   if (Array.isArray(a) && Array.isArray(b)) {
     const n = Math.min(a.length, b.length);
     for (let i = 0; i < n; i++) {

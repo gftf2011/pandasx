@@ -133,7 +133,117 @@ export class Index {
   toArray(): Label[] {
     return [...this.labels];
   }
+
+  // ---------------------------------------------------------- MultiIndex API
+
+  get isMulti(): boolean {
+    return this.names !== null && this.names.length > 1;
+  }
+
+  /** Position of a level given by number (negative from the end) or name. */
+  levelNumber(level: number | string): number {
+    const n = this.nlevels;
+    if (typeof level === 'number') {
+      const l = level < 0 ? n + level : level;
+      if (l < 0 || l >= n) throw new RangeError(`Too many levels: Index has only ${n} levels, not ${level + 1}`);
+      return l;
+    }
+    const names = this.isMulti ? this.names! : [this.name];
+    const l = names.indexOf(level);
+    if (l < 0) throw new Error(`Level ${level} not found`);
+    return l;
+  }
+
+  /** Values of one level, in row order. */
+  getLevelValues(level: number | string): Index {
+    const l = this.levelNumber(level);
+    if (!this.isMulti) return this;
+    return new Index(this.labels.map((t) => (t as readonly Label[])[l]), { name: this.names![l], tz: this.tz });
+  }
+
+  /** Sorted unique values of each level. */
+  get levels(): Label[][] {
+    return Array.from({ length: this.nlevels }, (_, l) => {
+      const seen = new Map<unknown, Label>();
+      for (const v of this.getLevelValues(l).labels) if (v !== null) seen.set(hashKey(v), v);
+      return [...seen.values()].sort(compareValues);
+    });
+  }
+
+  /** Index built from per-level arrays of the given positions (1 level → flat index). */
+  private fromLevels(levels: number[]): Index {
+    if (levels.length === 1) return this.getLevelValues(levels[0]);
+    const names = levels.map((l) => this.names![l]);
+    return new Index(this.labels.map((t) => levels.map((l) => (t as readonly Label[])[l])), { names, tz: this.tz });
+  }
+
+  /** Removes level(s). */
+  droplevel(level: number | string | readonly (number | string)[]): Index {
+    if (!this.isMulti) throw new Error('Cannot remove levels from an Index with a single level');
+    const drop = new Set((Array.isArray(level) ? level : [level as number | string]).map((l) => this.levelNumber(l)));
+    const keep = Array.from({ length: this.nlevels }, (_, l) => l).filter((l) => !drop.has(l));
+    if (keep.length === 0) throw new Error('Cannot remove all levels');
+    return this.fromLevels(keep);
+  }
+
+  swaplevel(i: number | string = -2, j: number | string = -1): Index {
+    const order = Array.from({ length: this.nlevels }, (_, l) => l);
+    const a = this.levelNumber(i), b = this.levelNumber(j);
+    [order[a], order[b]] = [order[b], order[a]];
+    return this.fromLevels(order);
+  }
+
+  reorderLevels(order: readonly (number | string)[]): Index {
+    return this.fromLevels(order.map((l) => this.levelNumber(l)));
+  }
+
+  setNames(names: string | null | readonly (string | null)[]): Index {
+    if (this.isMulti) {
+      if (!Array.isArray(names) || names.length !== this.nlevels) throw new RangeError(`Need ${this.nlevels} names`);
+      return new Index(this.labels, { names: names as (string | null)[], tz: this.tz });
+    }
+    return this.rename(Array.isArray(names) ? (names[0] ?? null) : (names as string | null));
+  }
+
+  /** Positions whose tuple label starts with `prefix`. */
+  getLocPrefix(prefix: readonly Label[]): number[] {
+    if (prefix.length === this.nlevels) return [...this.getLoc(prefix)];
+    const keys = prefix.map(hashKey);
+    const out: number[] = [];
+    this.labels.forEach((t, i) => {
+      const tuple = t as readonly Label[];
+      if (keys.every((k, l) => hashKey(tuple[l]) === k)) out.push(i);
+    });
+    return out;
+  }
+
+  /** MultiIndex from tuples, like `pd.MultiIndex.from_tuples`. */
+  static fromTuples(tuples: readonly (readonly Label[])[], options: { names?: readonly (string | null)[] } = {}): Index {
+    const n = tuples[0]?.length ?? options.names?.length ?? 2;
+    return new Index(tuples.map((t) => [...t]), { names: options.names ?? new Array(n).fill(null) });
+  }
+
+  /** MultiIndex from one array per level. */
+  static fromArrays(arrays: readonly (readonly Label[])[], options: { names?: readonly (string | null)[] } = {}): Index {
+    const n = arrays[0]?.length ?? 0;
+    if (arrays.some((a) => a.length !== n)) throw new RangeError('all arrays must be the same length');
+    return Index.fromTuples(Array.from({ length: n }, (_, i) => arrays.map((a) => a[i])), { names: options.names ?? arrays.map(() => null) });
+  }
+
+  /** Cartesian product of the levels, like `pd.MultiIndex.from_product`. */
+  static fromProduct(levels: readonly (readonly Label[])[], options: { names?: readonly (string | null)[] } = {}): Index {
+    let tuples: Label[][] = [[]];
+    for (const level of levels) tuples = tuples.flatMap((t) => level.map((v) => [...t, v]));
+    return Index.fromTuples(tuples, { names: options.names ?? levels.map(() => null) });
+  }
 }
+
+/** `pd.MultiIndex`-style constructors (a MultiIndex is an Index with tuple labels and level names). */
+export const MultiIndex = {
+  fromTuples: Index.fromTuples,
+  fromArrays: Index.fromArrays,
+  fromProduct: Index.fromProduct,
+};
 
 /**
  * Slice for loc/iloc. With `iloc` bounds are positions and `stop` is exclusive;
@@ -171,7 +281,7 @@ export class Slice {
   labelPositions(index: Index): number[] {
     const bound = (l: Label | undefined, first: boolean): number | undefined => {
       if (l === undefined) return undefined;
-      const locs = index.getLoc(l);
+      const locs = index.isMulti ? index.getLocPrefix(Array.isArray(l) ? (l as readonly Label[]) : [l]) : index.getLoc(l);
       if (locs.length === 0) throw new RangeError(`Label not found in index: ${String(l)}`);
       return first ? locs[0] : locs[locs.length - 1];
     };

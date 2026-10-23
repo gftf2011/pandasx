@@ -6,7 +6,17 @@ export { toDatetime, toTimedelta, dateRange, bdateRange, periodRange, timedeltaR
 export { offsets, toOffset, DateOffset, type BusinessOptions } from './core/offsets.ts';
 export { readCsv, parseCsv, toCsv, type ReadCsvOptions, type ToCsvOptions } from './io/csv.ts';
 export { readJson, toJson, type JsonOrient } from './io/json.ts';
-export { Index, Slice, slice } from './core/indexes.ts';
+export { Index, MultiIndex, Slice, slice } from './core/indexes.ts';
+export { Interval, type IntervalClosed } from './core/interval.ts';
+export { pivotTable, crosstab, getDummies, fromDummies, cut, qcut, intervalRange, factorize, unique, wideToLong, type PivotTableOptions, type CrosstabOptions, type DummiesOptions, type CutOptions } from './pivot.ts';
+export { mergeAsof, mergeOrdered, combineFirst, type MergeAsofOptions } from './combine.ts';
+export { pivot, stack, unstack } from './levels.ts';
+import { DataFrame as DF } from './frame.ts';
+
+/** Wide → long, like `pd.melt`. */
+export function melt(df: DF, options: Parameters<DF['melt']>[0] = {}): DF {
+  return df.melt(options);
+}
 export { DISPLAY as options } from './core/format.ts';
 export { StringMethods, DatetimeMethods } from './accessors.ts';
 export type { DType, Label, AggName } from './core/types.ts';

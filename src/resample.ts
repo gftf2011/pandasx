@@ -7,7 +7,7 @@ import { interpolate, type InterpolateMethod } from './core/stats.ts';
 import { MS, parseDate, parseTimedelta } from './core/time.ts';
 import { isNumericDType, type AggName } from './core/types.ts';
 import { fromWall, toWall } from './core/tz.ts';
-import { DataFrame } from './frame.ts';
+import { colKey, DataFrame } from './frame.ts';
 import { numericView, Series } from './series.ts';
 
 export interface ResampleOptions {
@@ -181,10 +181,10 @@ export class Resampler<T extends Target = Target> {
     for (const [name, col] of this.valueColumns()) {
       if (!isNumericDType(col.dtype)) continue;
       for (const [k, agg] of [['open', 'first'], ['high', 'max'], ['low', 'min'], ['close', 'last']] as const) {
-        cols.set(this.target instanceof Series ? k : `${name}_${k}`, Column.from(rows.map((r) => aggregate(col, agg, r)), 'float64'));
+        cols.set(this.target instanceof Series ? k : colKey([name!, k]), Column.from(rows.map((r) => aggregate(col, agg, r)), 'float64'));
       }
     }
-    return DataFrame._fromColumns(cols, this.index());
+    return DataFrame._fromColumns(cols, this.index(), this.target instanceof Series ? null : [null, null]);
   }
 
   /** One func for every column, a list, or `{column: func | func[]}`. */
@@ -199,17 +199,19 @@ export class Resampler<T extends Target = Target> {
       for (const [name, col] of this.valueColumns()) {
         (spec as readonly AggFn[]).forEach((f, i) => {
           if (typeof f === 'string' && NUMERIC_AGGS.has(f) && !isNumericDType(col.dtype)) return;
-          cols.set(this.target instanceof Series ? label(f, i) : `${name}_${label(f, i)}`, one(col, name, f));
+          cols.set(this.target instanceof Series ? label(f, i) : colKey([name!, label(f, i)]), one(col, name, f));
         });
       }
-    } else {
-      for (const [name, f] of Object.entries(spec as Record<string, AggFn | readonly AggFn[]>)) {
-        const col = (this.target as DataFrame)._column(name);
-        if (Array.isArray(f)) (f as readonly AggFn[]).forEach((g, i) => cols.set(`${name}_${label(g, i)}`, one(col, name, g)));
-        else cols.set(name, one(col, name, f as AggFn));
-      }
+      return DataFrame._fromColumns(cols, this.index(), this.target instanceof Series ? null : [null, null]);
     }
-    return DataFrame._fromColumns(cols, this.index());
+    const entries = Object.entries(spec as Record<string, AggFn | readonly AggFn[]>);
+    const multi = entries.some(([, f]) => Array.isArray(f));
+    for (const [name, f] of entries) {
+      const col = (this.target as DataFrame)._column(name);
+      if (Array.isArray(f)) (f as readonly AggFn[]).forEach((g, i) => cols.set(colKey([name, label(g, i)]), one(col, name, g)));
+      else cols.set(multi ? colKey([name, label(f as AggFn, 0)]) : name, one(col, name, f as AggFn));
+    }
+    return DataFrame._fromColumns(cols, this.index(), multi ? [null, null] : null);
   }
 
   aggregate(spec: AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): Target {

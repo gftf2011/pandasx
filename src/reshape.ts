@@ -90,12 +90,16 @@ export interface MergeOptions {
   sort?: boolean;
   /** Check the key relationship, e.g. '1:1', '1:m', 'm:1'. */
   validate?: '1:1' | '1:m' | 'm:1' | 'm:m';
+  /** Use the left / right index (all levels) as join key(s). */
+  leftIndex?: boolean;
+  rightIndex?: boolean;
 }
 
 const asList = (v: string | readonly string[] | undefined): string[] | undefined => (v === undefined ? undefined : typeof v === 'string' ? [v] : [...v]);
 
 /** Database-style hash join of two frames, like `pandas.merge`. */
 export function merge(left: DataFrame, right: DataFrame, options: MergeOptions = {}): DataFrame {
+  if (options.leftIndex || options.rightIndex) return mergeOnIndex(left, right, options);
   const how = options.how ?? 'inner';
   const [sx, sy] = options.suffixes ?? ['_x', '_y'];
   let leftOn = asList(options.leftOn) ?? asList(options.on);
@@ -189,4 +193,38 @@ function validate(kind: string, lMap: Map<unknown, number[]>, rMap: Map<unknown,
   const rightUnique = rMap.size === rn || [...rMap].every(([k, v]) => k === null || v.length === 1);
   if ((kind === '1:1' || kind === '1:m') && !leftUnique) throw new Error(`Merge keys are not unique in left dataset; not a ${kind} merge`);
   if ((kind === '1:1' || kind === 'm:1') && !rightUnique) throw new Error(`Merge keys are not unique in right dataset; not a ${kind} merge`);
+}
+
+/** merge() with `leftIndex` / `rightIndex`: index levels become hidden key columns. */
+function mergeOnIndex(left: DataFrame, right: DataFrame, options: MergeOptions): DataFrame {
+  const levelCols = (df: DataFrame, tag: string) => {
+    const idx = df.index;
+    const cols = new Map(df._cols);
+    const names: string[] = [];
+    for (let l = 0; l < idx.nlevels; l++) {
+      const name = `\u0000${tag}${l}`;
+      cols.set(name, Column.from(idx.isMulti ? idx.labels.map((t) => (t as readonly Label[])[l]) : idx.labels));
+      names.push(name);
+    }
+    cols.set(`\u0000${tag}pos`, Column.from(Array.from({ length: df.length }, (_, i) => i), 'int64'));
+    return { frame: DataFrame._fromColumns(cols, Index.range(df.length)), names };
+  };
+  const L = options.leftIndex ? levelCols(left, 'l') : { frame: DataFrame._fromColumns(new Map([...left._cols, ['\u0000lpos', Column.from(Array.from({ length: left.length }, (_, i) => i), 'int64')]]), left.index), names: asList(options.leftOn) ?? asList(options.on) ?? [] };
+  const R = options.rightIndex ? levelCols(right, 'r') : { frame: DataFrame._fromColumns(new Map([...right._cols, ['\u0000rpos', Column.from(Array.from({ length: right.length }, (_, i) => i), 'int64')]]), right.index), names: asList(options.rightOn) ?? asList(options.on) ?? [] };
+  if (L.names.length !== R.names.length) throw new Error('len(left keys) must equal len(right keys)');
+  const res = merge(L.frame, R.frame, { ...options, leftIndex: false, rightIndex: false, on: undefined, leftOn: L.names, rightOn: R.names });
+  const lpos = res._column('\u0000lpos').toArray().map((v) => (v === null || Number.isNaN(v) ? -1 : (v as number)));
+  const rpos = res._column('\u0000rpos').toArray().map((v) => (v === null || Number.isNaN(v) ? -1 : (v as number)));
+  let index: Index;
+  if (options.leftIndex && options.rightIndex) {
+    const labels = lpos.map((p, k) => (p >= 0 ? left.index.labels[p] : right.index.labels[rpos[k]]));
+    index = new Index(labels, { name: left.index.name, names: left.index.names });
+  } else if (options.leftIndex) index = right.index.take(rpos);
+  else index = left.index.take(lpos);
+  const cols = new Map([...res._cols].filter(([k]) => !k.startsWith('\u0000')));
+  let out = DataFrame._fromColumns(cols, index);
+  if (options.leftIndex && options.rightIndex && (options.how === 'outer' || options.sort)) {
+    out = out.take(argsort([sortKeyFromColumn(Column.from(index.labels, 'object'), true)], out.length));
+  }
+  return out;
 }

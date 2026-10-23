@@ -61,7 +61,7 @@ describe('resample', () => {
     near(t.resample('3D').ohlc().get('open').toArray().slice(0, 2), [0, 3]);
     assert.deepEqual(t.resample('ME').size().toArray(), [7, 2, 1]);
     const df = new DataFrame({ x: t.toArray(), y: t.mul(2).toArray() }, { index: idx });
-    assert.deepEqual((df.resample('ME').agg({ x: 'sum', y: ['min', 'max'] }) as DataFrame).columns, ['x', 'y_min', 'y_max']);
+    assert.deepEqual((df.resample('ME').agg({ x: 'sum', y: ['min', 'max'] }) as DataFrame).columnIndex.toArray(), [['x', 'sum'], ['y', 'min'], ['y', 'max']]);
   });
   it('upsampling', () => {
     const u = new Series([1, 3, 2], { index: pd.toDatetime(['2024-01-01', '2024-01-03', '2024-01-06']).toArray() as Date[], dtype: 'float64' });

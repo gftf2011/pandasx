@@ -5,7 +5,6 @@ import { Index, Slice } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
 import { correlation, covariance, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
 import { isNumericDType, type AggName, type DType, type Label } from './core/types.ts';
-import { compareValues, hashKey } from './core/values.ts';
 import { DataFrameGroupBy, resolveGroupKeys, type GroupByOptions, type GroupKey } from './groupby.ts';
 import { merge, type MergeOptions } from './reshape.ts';
 import { evaluateStatements } from './expr.ts';
@@ -13,13 +12,17 @@ import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from '.
 import type { Timedelta } from './core/time.ts';
 import type { DateOffset } from './core/offsets.ts';
 import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
+import { onAxis, pivot, stack, unstack, xs } from './levels.ts';
+import { pivotTable, type PivotTableOptions } from './pivot.ts';
+import { combineFirst, compare, explodeFrame, update } from './combine.ts';
+
 import { atTimePositions, betweenTimePositions, shiftIndex, toPeriodIndex, toTimestampIndex, truncatePositions, tzConvertIndex, tzLocalizeIndex } from './timeindex.ts';
 import type { Ambiguous, Nonexistent } from './core/tz.ts';
 
 import { toCsv, type ToCsvOptions } from './io/csv.ts';
 import { toJson, type JsonOrient } from './io/json.ts';
 import {
-  duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, labelPositions, positionalPositions, samplePositions,
+  dropMatchedLevels, duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, resolveRows, labelPositions, positionalPositions, samplePositions,
   Series, toIndex, type Mask, type Operand, type RowSelector,
 } from './series.ts';
 
@@ -50,6 +53,11 @@ export interface AxisAggOptions extends AggOptions {
 type AggFn = AggName | ((s: Series) => unknown);
 
 const isAxis1 = (axis: unknown) => axis === 1 || axis === 'columns';
+
+/** Separator joining the parts of a MultiIndex column label into its key. */
+export const COL_SEP = '\u001f';
+export const colKey = (tuple: readonly Label[]): string => tuple.map((p) => String(p ?? '')).join(COL_SEP);
+export const colTuple = (key: string): string[] => key.split(COL_SEP);
 
 /** Two-dimensional labeled table with typed columns, the equivalent of `pandas.DataFrame`. */
 export class DataFrame {
@@ -95,11 +103,19 @@ export class DataFrame {
   }
 
   /** @internal Builds a frame from already-validated columns. */
-  static _fromColumns(cols: Map<string, Column>, index: Index): DataFrame {
-    const df = Object.create(DataFrame.prototype) as { _cols: Map<string, Column>; index: Index };
+  static _fromColumns(cols: Map<string, Column>, index: Index, colNames: readonly (string | null)[] | null = null): DataFrame {
+    const df = Object.create(DataFrame.prototype) as { _cols: Map<string, Column>; index: Index; _colNames: readonly (string | null)[] | null };
     df._cols = cols;
     df.index = index;
+    df._colNames = colNames;
     return df as unknown as DataFrame;
+  }
+
+  /** Frame whose columns are labelled by tuples (a column MultiIndex). */
+  static _fromTupleColumns(cols: readonly [readonly Label[], Column][], index: Index, names?: readonly (string | null)[]): DataFrame {
+    const levels = cols[0]?.[0].length ?? names?.length ?? 1;
+    const map = new Map(cols.map(([t, c]) => [colKey(t), c]));
+    return DataFrame._fromColumns(map, index, levels > 1 ? (names ?? new Array(levels).fill(null)) : (names ? [names[0]] : null));
   }
 
   static fromRecords(records: readonly Record<string, unknown>[], options: FrameOptions = {}): DataFrame {
@@ -107,7 +123,65 @@ export class DataFrame {
   }
 
   private with(cols: Map<string, Column>, index: Index = this.index): DataFrame {
-    return DataFrame._fromColumns(cols, index);
+    // Keep column level names while the keys still have the same number of levels.
+    const n = this.nColumnLevels;
+    const keep = n > 1 ? [...cols.keys()].every((k) => k.split(COL_SEP).length === n) : n === 1 && cols.size > 0 && [...cols.keys()].every((k) => !k.includes(COL_SEP));
+    return DataFrame._fromColumns(cols, index, keep ? this._colNames : null);
+  }
+
+  // ---------------------------------------------------------- column levels
+
+  /** @internal Names of the column levels (null when flat and unnamed). */
+  _colNames: readonly (string | null)[] | null = null;
+
+  /** Number of column levels (1 for flat columns). */
+  get nColumnLevels(): number {
+    const first = this._cols.keys().next();
+    if (!first.done && first.value.includes(COL_SEP)) return first.value.split(COL_SEP).length;
+    return this._colNames && this._colNames.length > 1 ? this._colNames.length : 1;
+  }
+
+  /** Column labels as an Index; tuples (with level names) for MultiIndex columns. */
+  get columnIndex(): Index {
+    const keys = this.columns;
+    if (this.nColumnLevels > 1) return Index.fromTuples(keys.map(colTuple), { names: this._colNames ?? undefined });
+    return new Index(keys, { name: this._colNames?.[0] ?? null });
+  }
+
+  /** Replaces the column labels with an Index (tuples → MultiIndex columns) or names. */
+  setColumns(labels: Index | readonly (string | readonly string[])[]): this {
+    const list = labels instanceof Index ? labels.labels : labels;
+    if (list.length !== this._cols.size) throw new RangeError(`Expected ${this._cols.size} column labels, got ${list.length}`);
+    const keys = list.map((l) => (Array.isArray(l) ? colKey(l as readonly Label[]) : String(l)));
+    assertUniqueColumns(keys);
+    const cols = [...this._cols.values()];
+    this._cols.clear();
+    keys.forEach((k, j) => this._cols.set(k, cols[j]));
+    this._colNames = labels instanceof Index ? (labels.isMulti ? labels.names : labels.name !== null ? [labels.name] : null) : Array.isArray(list[0]) ? new Array((list[0] as readonly string[]).length).fill(null) : null;
+    return this;
+  }
+
+  /** Joins MultiIndex column labels into flat names, e.g. ('price', 'min') → 'price_min'. */
+  flattenColumns(sep = '_'): DataFrame {
+    const cols = new Map([...this._cols].map(([k, c]) => [colTuple(k).filter((p) => p !== '').join(sep), c]));
+    return DataFrame._fromColumns(cols, this.index);
+  }
+
+  /** Keys of the columns whose label starts with `prefix`. */
+  private columnsWithPrefix(prefix: readonly string[]): string[] {
+    return this.columns.filter((k) => {
+      const t = colTuple(k);
+      return prefix.every((p, l) => t[l] === p);
+    });
+  }
+
+  /** Sub-frame of the columns under `prefix`, with the matched levels removed. */
+  private columnGroup(prefix: readonly string[]): DataFrame {
+    const keys = this.columnsWithPrefix(prefix);
+    if (keys.length === 0) throw new KeyError(prefix.length === 1 ? prefix[0] : prefix);
+    const rest = this.nColumnLevels - prefix.length;
+    const cols = new Map(keys.map((k) => [colKey(colTuple(k).slice(prefix.length)), this._cols.get(k)!]));
+    return DataFrame._fromColumns(cols, this.index, rest > 1 && this._colNames ? this._colNames.slice(prefix.length) : null);
   }
 
   // ---------------------------------------------------------------- attributes
@@ -119,6 +193,7 @@ export class DataFrame {
   /** Renames all columns at once, like `df.columns = [...]`. */
   set columns(names: string[]) {
     if (names.length !== this._cols.size) throw new RangeError(`Expected ${this._cols.size} column names, got ${names.length}`);
+    assertUniqueColumns(names);
     const cols = [...this._cols.values()];
     this._cols.clear();
     names.forEach((n, j) => this._cols.set(n, cols[j]));
@@ -205,9 +280,27 @@ export class DataFrame {
   get(columns: readonly string[]): DataFrame;
   get(mask: Mask): DataFrame;
   get(key: string | readonly string[] | Mask): Series | DataFrame {
-    if (typeof key === 'string') return Series._from(this._column(key), this.index, key);
+    const multi = this.nColumnLevels > 1;
+    if (typeof key === 'string') {
+      if (this._cols.has(key)) return Series._from(this._cols.get(key)!, this.index, multi ? null : key);
+      if (multi) return this.columnGroup([key]);
+      throw new KeyError(key);
+    }
     if (isMask(key)) return this.loc(key);
-    return this.with(new Map((key as readonly string[]).map((k) => [k, this._column(k)])));
+    const list = key as readonly string[];
+    if (multi && list.length <= this.nColumnLevels && list.every((k) => typeof k === 'string' && !this._cols.has(k)) && this.columnsWithPrefix(list).length > 0) {
+      // A tuple: full key → Series, prefix → sub-frame.
+      if (list.length === this.nColumnLevels) return Series._from(this._cols.get(colKey(list))!, this.index, null);
+      return this.columnGroup(list);
+    }
+    const keys = list.flatMap((k) => (Array.isArray(k) ? [colKey(k as readonly string[])] : this._cols.has(k) || !multi ? [k] : this.columnsWithPrefix([k])));
+    return this.with(new Map(keys.map((k) => [k, this._column(k)])));
+  }
+
+  /** One column as a Series; a tuple addresses a MultiIndex column, e.g. `column(['price', 'min'])`. */
+  column(label: string | readonly string[]): Series {
+    const key = typeof label === 'string' ? label : colKey(label);
+    return Series._from(this._column(key), this.index, typeof label === 'string' && this.nColumnLevels === 1 ? label : null);
   }
 
   /** Sets (or replaces) a column in place, like `df['c'] = value`. Returns `this`. */
@@ -250,9 +343,10 @@ export class DataFrame {
   loc(rows: Label, cols?: Exclude<ColSelector, string> | null): Series;
   loc(rows: RowSelector | null | ((df: DataFrame) => Mask), cols: ColSelector | null = null): unknown {
     if (typeof rows === 'function') return this.loc(rows(this), cols as never);
-    const rowScalar = rows !== null && !(rows instanceof Slice) && !isMask(rows) && !(Array.isArray(rows) && !(this.index.nlevels > 1 && !Array.isArray(rows[0])));
-    const pos = rows === null ? null : labelPositions(rows, this.index);
-    return this.select(pos, rowScalar && pos!.length === 1, cols, false);
+    const r = rows === null ? null : resolveRows(rows, this.index);
+    const out = this.select(r ? r.pos : null, r !== null && r.scalar && r.pos.length === 1, cols, false);
+    if (r && r.drop && (out instanceof DataFrame || out instanceof Series)) out.index = dropMatchedLevels(out.index, r.drop);
+    return out;
   }
 
   /** Position-based selection. Row keys: integer, integers, mask, slice (exclusive), callable or `null`. */
@@ -480,6 +574,7 @@ export class DataFrame {
     if (options.columns) {
       const m = options.columns;
       const f = typeof m === 'function' ? m : (c: string) => m[c] ?? c;
+      assertUniqueColumns([...this._cols.keys()].map(f));
       cols = new Map([...this._cols].map(([k, v]) => [f(k), v]));
     }
     let index = this.index;
@@ -919,31 +1014,30 @@ export class DataFrame {
     return this.with(cols, Index.range(positions.length));
   }
 
-  /**
-   * Spreads long → wide: one row per `index` value, one column per `columns` value,
-   * cells aggregated with `aggfunc` (default 'mean').
-   */
-  pivotTable(options: { index: string; columns: string; values: string; aggfunc?: AggName; fillValue?: unknown }): DataFrame {
-    const grouped = this.groupby([options.index, options.columns]).get(options.values).agg(options.aggfunc ?? 'mean') as Series;
-    const rowKeys: Label[] = [];
-    const colKeys: Label[] = [];
-    const seenR = new Set<unknown>(), seenC = new Set<unknown>();
-    for (const t of grouped.index.labels as readonly (readonly Label[])[]) {
-      if (!seenR.has(hashKey(t[0]))) { seenR.add(hashKey(t[0])); rowKeys.push(t[0]); }
-      if (!seenC.has(hashKey(t[1]))) { seenC.add(hashKey(t[1])); colKeys.push(t[1]); }
-    }
-    rowKeys.sort(compareValues);
-    colKeys.sort(compareValues);
-    const rowIdx = new Index(rowKeys, { name: options.index });
-    const cols = new Map<string, Column>();
-    for (const ck of colKeys) {
-      const vals = rowKeys.map((rk) => {
-        const v = grouped.get([rk, ck]);
-        return v === undefined ? (options.fillValue ?? null) : v;
-      });
-      cols.set(String(ck), Column.from(vals));
-    }
-    return this.with(cols, rowIdx);
+  /** Spreadsheet-style pivot table with aggregation, margins and multiple keys. */
+  pivotTable(options: PivotTableOptions): DataFrame {
+    return pivotTable(this, options);
+  }
+
+  /** Expands list-like cells of `columns` into one row per element. */
+  explode(columns: string | readonly string[], options: { ignoreIndex?: boolean } = {}): DataFrame {
+    return explodeFrame(this, columns, options.ignoreIndex);
+  }
+
+  /** Fills missing values (and missing labels) from `other`. */
+  combineFirst(other: DataFrame): DataFrame {
+    return combineFirst(this, other);
+  }
+
+  /** In-place update with the non-missing values of `other`. */
+  update(other: DataFrame | Series, options: { overwrite?: boolean; filterFunc?: (v: unknown) => boolean } = {}): this {
+    update(this, other, options);
+    return this;
+  }
+
+  /** Cell differences with `other`, as (column, 'self'/'other') columns. */
+  compare(other: DataFrame, options: { keepShape?: boolean; keepEqual?: boolean; resultNames?: [string, string] } = {}): DataFrame {
+    return compare(this, other, options);
   }
 
   // ------------------------------------------------------- element-wise operators
@@ -983,6 +1077,42 @@ export class DataFrame {
   gt(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.gt(b)); }
   ge(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.ge(b)); }
 
+
+
+  // ------------------------------------------------------------- MultiIndex
+
+  /** Cross-section at `key` of an index level (or of the columns with `axis: 1`). */
+  xs(key: Label, options: { level?: number | string | readonly (number | string)[]; axis?: 0 | 1 | 'index' | 'columns'; dropLevel?: boolean } = {}): unknown {
+    return xs(this, key, options);
+  }
+
+  /** Removes index level(s) (or column levels with `axis: 1`). */
+  droplevel(level: number | string | readonly (number | string)[], options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): DataFrame {
+    return onAxis(this, options.axis, (i) => i.droplevel(level));
+  }
+
+  swaplevel(i: number | string = -2, j: number | string = -1, options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): DataFrame {
+    return onAxis(this, options.axis, (x) => x.swaplevel(i, j));
+  }
+
+  reorderLevels(order: readonly (number | string)[], options: { axis?: 0 | 1 | 'index' | 'columns' } = {}): DataFrame {
+    return onAxis(this, options.axis, (x) => x.reorderLevels(order));
+  }
+
+  /** Moves a column level into the row index (flat columns → Series). */
+  stack(options: { level?: number | string; dropna?: boolean } = {}): Series | DataFrame {
+    return stack(this, options);
+  }
+
+  /** Moves row index level(s) into the columns. */
+  unstack(options: { level?: number | string | readonly (number | string)[]; fillValue?: unknown } = {}): DataFrame | Series {
+    return unstack(this, options);
+  }
+
+  /** Reshapes without aggregation, like `df.pivot(index, columns, values)`. */
+  pivot(options: { index?: string | readonly string[]; columns: string | readonly string[]; values?: string | readonly string[] }): DataFrame {
+    return pivot(this, options);
+  }
 
   // -------------------------------------------------------------- time series
 
@@ -1097,7 +1227,7 @@ export class DataFrame {
     lines.push(`Data columns (total ${this._cols.size} columns):`);
     const names = this.columns;
     const rows = names.map((n, i) => [String(i).padStart(2), n, `${aggregate(this._cols.get(n)!, 'count')} non-null`, this._cols.get(n)!.dtype]);
-    lines.push(renderTable([' #', 'Column', 'Non-Null Count', 'Dtype'], [0, 1, 2, 3].map((j) => rows.map((r) => r[j])), 4));
+    lines.push(renderTable([[' #', 'Column', 'Non-Null Count', 'Dtype']], [0, 1, 2, 3].map((j) => rows.map((r) => r[j])), 4));
     const counts = new Map<string, number>();
     for (const c of this._cols.values()) counts.set(c.dtype, (counts.get(c.dtype) ?? 0) + 1);
     lines.push('dtypes: ' + [...counts].map(([d, n]) => `${d}(${n})`).join(', '));
@@ -1112,17 +1242,25 @@ export class DataFrame {
     const rowPos = displayPositions(nrows, DISPLAY.maxRows, DISPLAY.minRows);
     const colPos = displayPositions(ncols, DISPLAY.maxColumns, DISPLAY.maxColumns);
     const names = this.columns;
+    const levels = this.nColumnLevels;
     const idx = formatIndex(this.index, rowPos);
-    const header: string[] = idx.map(() => '');
-    const header2: string[] = this.index.nlevels > 1 ? this.index.names!.map((n) => n ?? '') : [this.index.name ?? ''];
+    // One header row per column level (sparsified like pandas), then the index names.
+    const headers: string[][] = Array.from({ length: levels }, (_, l) => idx.map((_, k) => (k === idx.length - 1 ? (levels > 1 ? (this._colNames?.[l] ?? '') : (this._colNames?.[0] ?? '')) : '')));
+    const indexNames: string[] = this.index.nlevels > 1 ? this.index.names!.map((n) => n ?? '') : [this.index.name ?? ''];
     const body: string[][] = [...idx];
+    let prev: string[] | null = null;
     for (const j of colPos) {
-      if (j === null) { header.push('...'); header2.push(''); body.push(rowPos.map(() => '...')); continue; }
-      header.push(names[j]);
-      header2.push('');
+      if (j === null) { headers.forEach((h) => h.push('...')); indexNames.push(''); body.push(rowPos.map(() => '...')); prev = null; continue; }
+      const tuple = levels > 1 ? colTuple(names[j]) : [names[j]];
+      tuple.forEach((part, l) => {
+        const same = prev !== null && l < levels - 1 && tuple.slice(0, l + 1).every((p, k) => p === prev![k]);
+        headers[l].push(same ? '' : part);
+      });
+      prev = tuple;
+      indexNames.push('');
       body.push(formatColumn(this._cols.get(names[j])!, rowPos));
     }
-    let out = renderTable(header, body, idx.length, header2);
+    let out = renderTable([...headers, indexNames], body, idx.length);
     if (nrows > DISPLAY.maxRows || ncols > DISPLAY.maxColumns) out += `\n\n[${nrows} rows x ${ncols} columns]`;
     return out;
   }
@@ -1133,6 +1271,15 @@ export class DataFrame {
 }
 
 // ----------------------------------------------------------------- helpers
+
+/** Column labels are keys of a Map, so duplicates would silently drop data. */
+function assertUniqueColumns(keys: readonly string[]): void {
+  const seen = new Set<string>();
+  for (const k of keys) {
+    if (seen.has(k)) throw new Error(`Duplicate column label "${k.split(COL_SEP).join(', ')}": node-pandas requires unique column labels`);
+    seen.add(k);
+  }
+}
 
 function isArrayish(v: unknown): boolean {
   return Array.isArray(v) || ArrayBuffer.isView(v) || v instanceof Column;
