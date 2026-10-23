@@ -7,6 +7,8 @@ import { DataFrame } from './frame.ts';
 import { concat } from './reshape.ts';
 import { samplePositions, Series } from './series.ts';
 import type { RankOptions } from './core/stats.ts';
+import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from './window.ts';
+import { Resampler, type ResampleOptions } from './resample.ts';
 
 /** A grouping key: column name, Series (aligned on the index), array of keys, or function of the index label. */
 export type GroupKey = string | Series | readonly unknown[] | ((label: Label) => unknown);
@@ -79,7 +81,7 @@ function resultDType(agg: AggName, dtype: DType, values: readonly unknown[]): DT
   }
 }
 
-abstract class BaseGroupBy {
+export abstract class BaseGroupBy {
   /** @internal */
   readonly _frame: DataFrame;
   /** @internal Columns holding the keys. */
@@ -136,6 +138,27 @@ abstract class BaseGroupBy {
     const out = new Float64Array(this._frame.length).fill(NaN);
     for (const rows of this._groups.rows) rows.forEach((p, k) => (out[p] = options.ascending === false ? rows.length - 1 - k : k));
     return Series._from(Column.from(Array.from(out)), this._frame.index, null);
+  }
+
+  /** @internal The per-group object windows operate on. */
+  protected abstract _groupTarget(rows: number[]): Series | DataFrame;
+
+  /** Rolling window within each group; results are indexed by (group key, original label). */
+  rolling(window: number | string, options: RollingOptions = {}): GroupedOperation {
+    return new GroupedOperation(this, (t) => new Rolling(t, window, options));
+  }
+
+  expanding(options: { minPeriods?: number } = {}): GroupedOperation {
+    return new GroupedOperation(this, (t) => new Expanding(t, options));
+  }
+
+  ewm(options: EwmOptions): GroupedOperation {
+    return new GroupedOperation(this, (t) => new EWM(t, options));
+  }
+
+  /** Time resampling within each group. */
+  resample(rule: string, options: ResampleOptions = {}): GroupedOperation {
+    return new GroupedOperation(this, (t) => new Resampler(t, rule, options));
   }
 
   /** Calls `fn(this)`, for method chaining. */
@@ -215,6 +238,10 @@ export class DataFrameGroupBy extends BaseGroupBy {
 
   private valueColumns(): string[] {
     return this.selection ? [...this.selection] : this._frame.columns.filter((c) => !this._by.includes(c) && !c.startsWith('\u0000'));
+  }
+
+  protected override _groupTarget(rows: number[]): DataFrame {
+    return this._frame.get(this.valueColumns()).take(rows);
   }
 
   /** `groupby(...).get('col')` ≈ `groupby(...)['col']`. */
@@ -435,6 +462,10 @@ export class SeriesGroupBy extends BaseGroupBy {
     return this._frame._column(this.column);
   }
 
+  protected override _groupTarget(rows: number[]): Series {
+    return Series._from(this.col().take(rows), this._frame.index.take(rows), this.resultName);
+  }
+
   private series(col: Column): Series {
     if (this.options.asIndex) return Series._from(col, this._keyIndex(), this.resultName);
     return Series._from(col, Index.range(this.ngroups), this.resultName);
@@ -633,4 +664,55 @@ export function resolveGroupKeys(
   if (outBy.length === 0) throw new Error('You have to supply one of `by` and `level`');
   const out = hidden.size ? DataFrame._fromColumns(new Map([...frame._cols, ...hidden]), frame.index) : frame;
   return { frame: out, by: outBy, names };
+}
+
+type Windowish = Rolling | Expanding | EWM | Resampler;
+
+/**
+ * A window or resampler applied per group. Calling an aggregation (mean, sum,
+ * std, ...) runs it on every group and stacks the results under a
+ * (group key, label) index, like pandas.
+ */
+export class GroupedOperation {
+  private readonly gb: BaseGroupBy;
+  private readonly make: (t: Series | DataFrame) => Windowish;
+
+  constructor(gb: BaseGroupBy, make: (t: Series | DataFrame) => Windowish) {
+    this.gb = gb;
+    this.make = make;
+    const methods = ['sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'sem', 'count', 'skew', 'kurt', 'quantile', 'apply', 'agg',
+      'first', 'last', 'prod', 'nunique', 'ohlc', 'size', 'rank', 'corr', 'cov', 'ffill', 'bfill', 'asfreq', 'interpolate'];
+    for (const m of methods) {
+      (this as unknown as Record<string, unknown>)[m] = (...args: unknown[]) => this.call(m, args);
+    }
+  }
+
+  /** Runs `method(...args)` on each group's window and stacks the results. */
+  call(method: string, args: readonly unknown[] = []): Series | DataFrame {
+    const g = (this.gb as unknown as { _groups: { keys: Label[][]; rows: number[][] } })._groups;
+    const keyNames = (this.gb as unknown as { _keyNames: readonly (string | null)[] })._keyNames;
+    const target = (rows: number[]) => (this.gb as unknown as { _groupTarget(r: number[]): Series | DataFrame })._groupTarget(rows);
+    const parts: (Series | DataFrame)[] = [];
+    let innerName: string | null = null;
+    g.rows.forEach((rows, i) => {
+      const w = this.make(target(rows)) as unknown as Record<string, (...a: unknown[]) => Series | DataFrame>;
+      if (typeof w[method] !== 'function') throw new Error(`${method} is not available here`);
+      const res = w[method](...args);
+      innerName = res.index.name;
+      const labels = res.index.labels.map((l) => [...g.keys[i], ...(Array.isArray(l) ? l : [l])] as Label);
+      parts.push(res instanceof Series ? Series._from(res._col, new Index(labels), res.name) : DataFrame._fromColumns(res._cols, new Index(labels)));
+    });
+    const out: Series | DataFrame = parts.every((p) => p instanceof Series) ? concat(parts as Series[]) : concat(parts);
+    const index = new Index(out.index.labels, { names: [...keyNames, innerName] });
+    return out instanceof Series ? Series._from(out._col, index, out.name) : DataFrame._fromColumns(out._cols, index);
+  }
+}
+
+export interface GroupedOperation {
+  sum(): Series | DataFrame; mean(): Series | DataFrame; median(): Series | DataFrame; min(): Series | DataFrame; max(): Series | DataFrame;
+  std(ddof?: number): Series | DataFrame; var(ddof?: number): Series | DataFrame; sem(): Series | DataFrame; count(): Series | DataFrame;
+  skew(): Series | DataFrame; kurt(): Series | DataFrame; quantile(q: number): Series | DataFrame; apply(fn: (v: any) => unknown, options?: object): Series | DataFrame;
+  agg(spec: unknown): Series | DataFrame; first(): Series | DataFrame; last(): Series | DataFrame; prod(): Series | DataFrame;
+  nunique(): Series | DataFrame; ohlc(): DataFrame; size(): Series; rank(options?: object): Series | DataFrame;
+  ffill(): Series | DataFrame; bfill(): Series | DataFrame; asfreq(): Series | DataFrame; interpolate(): Series | DataFrame;
 }

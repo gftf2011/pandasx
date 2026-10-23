@@ -9,6 +9,13 @@ import { compareValues, hashKey } from './core/values.ts';
 import { DataFrameGroupBy, resolveGroupKeys, type GroupByOptions, type GroupKey } from './groupby.ts';
 import { merge, type MergeOptions } from './reshape.ts';
 import { evaluateStatements } from './expr.ts';
+import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from './window.ts';
+import type { Timedelta } from './core/time.ts';
+import type { DateOffset } from './core/offsets.ts';
+import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
+import { atTimePositions, betweenTimePositions, shiftIndex, toPeriodIndex, toTimestampIndex, truncatePositions, tzConvertIndex, tzLocalizeIndex } from './timeindex.ts';
+import type { Ambiguous, Nonexistent } from './core/tz.ts';
+
 import { toCsv, type ToCsvOptions } from './io/csv.ts';
 import { toJson, type JsonOrient } from './io/json.ts';
 import {
@@ -554,6 +561,27 @@ export class DataFrame {
   max(options?: AxisAggOptions): Series { return this.reduce('max', options); }
   count(options?: AxisAggOptions): Series { return this.reduce('count', options); }
   sem(options?: AxisAggOptions): Series { return this.reduce('sem', options); }
+  skew(): Series { return this.perNumeric((s) => s.skew()); }
+  kurt(): Series { return this.perNumeric((s) => s.kurt()); }
+  kurtosis(): Series { return this.kurt(); }
+
+  private perNumeric(fn: (s: Series) => unknown): Series {
+    const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
+    return new Series(names.map((n) => fn(this.get(n))), { index: names });
+  }
+
+  /** Rolling window of `window` rows, or a time span ('3D') over a datetime index / `on` column. */
+  rolling(window: number | string | Timedelta, options: RollingOptions = {}): Rolling<DataFrame> {
+    return new Rolling(this, window, options);
+  }
+
+  expanding(options: { minPeriods?: number } = {}): Expanding<DataFrame> {
+    return new Expanding(this, options);
+  }
+
+  ewm(options: EwmOptions): EWM<DataFrame> {
+    return new EWM(this, options);
+  }
   any(options?: AxisAggOptions): Series { return this.reduce('any', options); }
   all(options?: AxisAggOptions): Series { return this.reduce('all', options); }
   nunique(options?: AxisAggOptions): Series { return this.reduce('nunique', options); }
@@ -666,7 +694,11 @@ export class DataFrame {
   abs(): DataFrame { return this.mapColumns((s) => s.abs(), true); }
   round(decimals = 0): DataFrame { return this.mapColumns((s) => s.round(decimals), true); }
   clip(lower?: number | null, upper?: number | null): DataFrame { return this.mapColumns((s) => s.clip(lower, upper), true); }
-  shift(periods = 1): DataFrame { return this.mapColumns((s) => s.shift(periods)); }
+  /** Shifts rows by `periods` (or the datetime index with `{ freq }`). */
+  shift(periods = 1, options: { freq?: string | DateOffset; fillValue?: unknown } = {}): DataFrame {
+    if (options.freq !== undefined) return shiftIndex(this, periods, options.freq);
+    return this.mapColumns((s) => s.shift(periods, { fillValue: options.fillValue }));
+  }
   diff(periods = 1): DataFrame { return this.mapColumns((s) => s.diff(periods), true); }
   pctChange(periods = 1): DataFrame { return this.mapColumns((s) => s.pctChange(periods), true); }
   rank(options: RankOptions & { numericOnly?: boolean } = {}): DataFrame { return this.mapColumns((s) => s.rank(options), options.numericOnly); }
@@ -950,6 +982,69 @@ export class DataFrame {
   le(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.le(b)); }
   gt(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.gt(b)); }
   ge(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.ge(b)); }
+
+
+  // -------------------------------------------------------------- time series
+
+  /** @internal Same data with another index. */
+  _withIndex(index: Index): this {
+    return this.with(new Map(this._cols), index) as this;
+  }
+
+  /** Groups by time bins, like `resample('ME')` / `resample('15min')`. */
+  resample(rule: string | DateOffset, options: ResampleOptions = {}): Resampler<DataFrame> {
+    return new Resampler(this, rule, options);
+  }
+
+  /** Conforms a datetime index to `freq`, optionally filling ('ffill' / 'bfill'). */
+  asfreq(freq: string | DateOffset, options: { method?: 'pad' | 'ffill' | 'bfill' | 'backfill'; fillValue?: unknown } = {}): DataFrame {
+    return asfreq(this, freq, options) as DataFrame;
+  }
+
+  /** Localizes a naive datetime index to `tz` (or removes the zone with null). */
+  tzLocalize(tz: string | null, options: { ambiguous?: Ambiguous; nonexistent?: Nonexistent } = {}): DataFrame {
+    return tzLocalizeIndex(this, tz, options);
+  }
+
+  /** Converts a tz-aware datetime index to another zone. */
+  tzConvert(tz: string | null): DataFrame {
+    return tzConvertIndex(this, tz);
+  }
+
+  /** Rows at a time of day, e.g. `atTime('09:30')`. */
+  atTime(time: string): DataFrame {
+    return this.take(atTimePositions(this.index, time)) as DataFrame;
+  }
+
+  /** Rows between two times of day, e.g. `betweenTime('09:00', '17:00')`. */
+  betweenTime(start: string, end: string, options: { inclusive?: 'both' | 'neither' | 'left' | 'right' } = {}): DataFrame {
+    return this.take(betweenTimePositions(this.index, start, end, options.inclusive)) as DataFrame;
+  }
+
+  /** Rows with index labels between `before` and `after` (inclusive). */
+  truncate(options: { before?: Label | string; after?: Label | string } = {}): DataFrame {
+    return this.take(truncatePositions(this.index, options.before, options.after)) as DataFrame;
+  }
+
+  /** Converts a datetime index to a period index. */
+  toPeriod(freq = 'D'): DataFrame {
+    return toPeriodIndex(this, freq);
+  }
+
+  /** Converts a period index to datetimes at the start (or end) of each period. */
+  toTimestamp(how: 'start' | 'end' = 'start'): DataFrame {
+    return toTimestampIndex(this, how);
+  }
+
+  firstValidIndex(): Label {
+    for (let i = 0; i < this.length; i++) if ([...this._cols.values()].some((c) => !c.isNA(i))) return this.index.labels[i];
+    return null;
+  }
+
+  lastValidIndex(): Label {
+    for (let i = this.length - 1; i >= 0; i--) if ([...this._cols.values()].some((c) => !c.isNA(i))) return this.index.labels[i];
+    return null;
+  }
 
   // ------------------------------------------------------------------- output
 

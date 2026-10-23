@@ -3,10 +3,17 @@ import { Column } from './core/column.ts';
 import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn, type NaPosition } from './core/sort.ts';
-import { correlation, covariance, interpolate, rankPositions, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
+import { correlation, covariance, interpolate, kurtosis, rankPositions, skewness, type CorrMethod, type InterpolateOptions, type RankOptions } from './core/stats.ts';
+import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from './window.ts';
+import { asfreq, Resampler, type ResampleOptions } from './resample.ts';
+import { atTimePositions, betweenTimePositions, shiftIndex, toPeriodIndex, toTimestampIndex, truncatePositions, tzConvertIndex, tzLocalizeIndex } from './timeindex.ts';
+import type { Ambiguous, Nonexistent } from './core/tz.ts';
+
 import { isNumericDType, isNumericStorage, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
 import { normalizeFreq, parseDate, parsePeriodString, parseTimedelta, Period, periodOrdinal, Timedelta } from './core/time.ts';
 import { compareValues, hashKey, isNA, valuesEqual } from './core/values.ts';
+import { DateOffset } from './core/offsets.ts';
+import { fromWall, toWall } from './core/tz.ts';
 import { CategoricalMethods, DatetimeMethods, StringMethods } from './accessors.ts';
 import { DataFrame } from './frame.ts';
 import { resolveGroupKeys, SeriesGroupBy, type GroupByOptions, type GroupKey } from './groupby.ts';
@@ -30,7 +37,7 @@ export interface SeriesOptions {
 export type Mask = Series | readonly boolean[] | Uint8Array;
 
 /** Operand of arithmetic and comparison methods. */
-export type Operand = Series | readonly unknown[] | Float64Array | number | bigint | string | boolean | Date | Timedelta | Period | null;
+export type Operand = Series | readonly unknown[] | Float64Array | number | bigint | string | boolean | Date | Timedelta | Period | DateOffset | null;
 
 export type RowSelector = Label | readonly Label[] | Mask | Slice;
 
@@ -321,6 +328,29 @@ export class Series {
   var(opts?: AggOptions): number { return this.agg1('var', opts) as number; }
   min(opts?: AggOptions): unknown { return this.agg1('min', opts); }
   max(opts?: AggOptions): unknown { return this.agg1('max', opts); }
+  /** Sample skewness (bias corrected). */
+  skew(): number { return skewness(numericView(this._col, 'skew')); }
+  /** Excess kurtosis (bias corrected). */
+  kurt(): number { return kurtosis(numericView(this._col, 'kurt')); }
+  kurtosis(): number { return this.kurt(); }
+
+  // ------------------------------------------------------------------ windows
+
+  /** Rolling window of `window` rows, or a time span ('3D', '2h') over a datetime index. */
+  rolling(window: number | string | Timedelta, options: RollingOptions = {}): Rolling<Series> {
+    return new Rolling(this, window, options);
+  }
+
+  /** Expanding window (all rows up to the current one). */
+  expanding(options: { minPeriods?: number } = {}): Expanding<Series> {
+    return new Expanding(this, options);
+  }
+
+  /** Exponentially weighted window; pass one of com, span, halflife or alpha. */
+  ewm(options: EwmOptions): EWM<Series> {
+    return new EWM(this, options);
+  }
+
   /** Standard error of the mean. */
   sem(opts?: AggOptions): number { return this.agg1('sem', opts) as number; }
   /** Number of non-missing values. */
@@ -450,8 +480,14 @@ export class Series {
   cummax(): Series { return this.cumulative((a, v) => Math.max(a, v), -Infinity); }
   cummin(): Series { return this.cumulative((a, v) => Math.min(a, v), Infinity); }
 
-  /** Shifts values by `periods` positions, filling with NA. */
-  shift(periods = 1, fillValue: unknown = null): Series {
+  /**
+   * Shifts values by `periods` positions (filling with NA or `fillValue`), or
+   * with `{ freq }` shifts the datetime index instead of the data.
+   */
+  shift(periods = 1, options: { freq?: string | DateOffset; fillValue?: unknown } | unknown = {}): Series {
+    const opts = isPlainObject(options) ? (options as { freq?: string | DateOffset; fillValue?: unknown }) : { fillValue: options };
+    if (opts.freq !== undefined) return shiftIndex(this, periods, opts.freq);
+    const fillValue = opts.fillValue ?? null;
     const n = this.length;
     const pos = new Int32Array(n);
     for (let i = 0; i < n; i++) {
@@ -461,6 +497,17 @@ export class Series {
     let col = this._col.take(pos);
     if (!isNA(fillValue)) col = col.mapLike((v, i) => (pos[i] < 0 ? fillValue : v));
     return this.with(col);
+  }
+
+  /** Label of the first non-missing value (null when none). */
+  firstValidIndex(): Label {
+    for (let i = 0; i < this.length; i++) if (!this._col.isNA(i)) return this.index.labels[i];
+    return null;
+  }
+
+  lastValidIndex(): Label {
+    for (let i = this.length - 1; i >= 0; i--) if (!this._col.isNA(i)) return this.index.labels[i];
+    return null;
   }
 
   diff(periods = 1): Series {
@@ -720,6 +767,7 @@ export class Series {
   }
 
   private arith(op: string, other: Operand, reverse = false): Series {
+    if (other instanceof DateOffset) return this.applyOffset(other, op, reverse);
     const { left, right, scalar, index } = this._align(other);
     const fn = ARITH[op];
     const n = left.length;
@@ -758,6 +806,20 @@ export class Series {
       out[i] = reverse ? g(y, x) : g(x, y);
     }
     return new Series(out, { index, name });
+  }
+
+  /** Datetime ± calendar offset, applied on wall-clock time. */
+  private applyOffset(offset: DateOffset, op: string, reverse: boolean): Series {
+    if (this.dtype !== 'datetime') throw new TypeError(`Cannot apply a DateOffset to dtype ${this.dtype}`);
+    if (op !== 'add' && !(op === 'sub' && !reverse)) throw new TypeError(`Unsupported operation with DateOffset: ${op}`);
+    const tz = this._col.meta.tz ?? null;
+    const n = op === 'sub' ? -offset.n : offset.n;
+    const out = (this._col.data as Float64Array).map((t) => {
+      if (t !== t) return NaN;
+      const w = offset.apply(toWall(t, tz), n);
+      return tz ? fromWall(w, tz, 'earliest', 'shift_forward') : w;
+    });
+    return this.with(new Column('datetime', out, { tz }));
   }
 
   add(other: Operand): Series { return this.arith('add', other); }
@@ -921,6 +983,59 @@ export class Series {
     return new SeriesGroupBy(r.frame, r.by, '\u0000value', options, r.names, this.name);
   }
 
+
+
+  // -------------------------------------------------------------- time series
+
+  /** @internal Same data with another index. */
+  _withIndex(index: Index): this {
+    return this.with(this._col, index) as this;
+  }
+
+  /** Groups by time bins, like `resample('ME')` / `resample('15min')`. */
+  resample(rule: string | DateOffset, options: ResampleOptions = {}): Resampler<Series> {
+    return new Resampler(this, rule, options);
+  }
+
+  /** Conforms a datetime index to `freq`, optionally filling ('ffill' / 'bfill'). */
+  asfreq(freq: string | DateOffset, options: { method?: 'pad' | 'ffill' | 'bfill' | 'backfill'; fillValue?: unknown } = {}): Series {
+    return asfreq(this, freq, options) as Series;
+  }
+
+  /** Localizes a naive datetime index to `tz` (or removes the zone with null). */
+  tzLocalize(tz: string | null, options: { ambiguous?: Ambiguous; nonexistent?: Nonexistent } = {}): Series {
+    return tzLocalizeIndex(this, tz, options);
+  }
+
+  /** Converts a tz-aware datetime index to another zone. */
+  tzConvert(tz: string | null): Series {
+    return tzConvertIndex(this, tz);
+  }
+
+  /** Rows at a time of day, e.g. `atTime('09:30')`. */
+  atTime(time: string): Series {
+    return this.take(atTimePositions(this.index, time)) as Series;
+  }
+
+  /** Rows between two times of day, e.g. `betweenTime('09:00', '17:00')`. */
+  betweenTime(start: string, end: string, options: { inclusive?: 'both' | 'neither' | 'left' | 'right' } = {}): Series {
+    return this.take(betweenTimePositions(this.index, start, end, options.inclusive)) as Series;
+  }
+
+  /** Rows with index labels between `before` and `after` (inclusive). */
+  truncate(options: { before?: Label | string; after?: Label | string } = {}): Series {
+    return this.take(truncatePositions(this.index, options.before, options.after)) as Series;
+  }
+
+  /** Converts a datetime index to a period index. */
+  toPeriod(freq = 'D'): Series {
+    return toPeriodIndex(this, freq);
+  }
+
+  /** Converts a period index to datetimes at the start (or end) of each period. */
+  toTimestamp(how: 'start' | 'end' = 'start'): Series {
+    return toTimestampIndex(this, how);
+  }
 
   // ------------------------------------------------------------------ display
 

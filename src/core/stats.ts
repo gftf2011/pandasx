@@ -166,10 +166,10 @@ export function interpolate(y: ArrayLike<number>, x: ArrayLike<number>, options:
       break;
     case 'cubic':
     case 'cubicspline':
-      evaluate = naturalCubicSpline(kx, ky);
+      evaluate = notAKnotSpline(kx, ky);
       break;
     case 'spline':
-      evaluate = (options.order ?? 3) === 3 ? naturalCubicSpline(kx, ky) : localPolynomial(kx, ky, options.order ?? 3);
+      evaluate = (options.order ?? 3) === 3 ? notAKnotSpline(kx, ky) : localPolynomial(kx, ky, options.order ?? 3);
       break;
     case 'quadratic':
       evaluate = localPolynomial(kx, ky, 2);
@@ -179,8 +179,10 @@ export function interpolate(y: ArrayLike<number>, x: ArrayLike<number>, options:
       evaluate = localPolynomial(kx, ky, options.order);
       break;
     case 'pchip':
-    case 'akima':
       evaluate = pchip(kx, ky);
+      break;
+    case 'akima':
+      evaluate = akima(kx, ky);
       break;
     default:
       evaluate = (xv) => linearAt(kx, ky, xv);
@@ -191,7 +193,12 @@ export function interpolate(y: ArrayLike<number>, x: ArrayLike<number>, options:
   const last = known[known.length - 1];
   const direction = options.limitDirection ?? (method === 'bfill' || method === 'backfill' ? 'backward' : 'forward');
   const limit = options.limit ?? Infinity;
-  const extrapolates = method === 'pad' || method === 'ffill' || method === 'zero' || method === 'bfill' || method === 'backfill' || method === 'nearest';
+  // Like pandas/scipy: linear-type methods hold the edge value, directional fills
+  // extend, pchip / cubicspline / spline extrapolate, the other scipy methods stay NaN outside.
+  const edge: 'hold' | 'fill' | 'extrapolate' | 'none' =
+    method === 'pad' || method === 'ffill' || method === 'bfill' || method === 'backfill' ? 'fill'
+      : method === 'pchip' || method === 'cubicspline' || method === 'spline' ? 'extrapolate'
+        : method === 'linear' || method === 'time' || method === 'index' || method === 'values' ? 'hold' : 'none';
   for (let i = 0; i < n; i++) {
     if (y[i] === y[i]) continue;
     const inside = i > first && i < last;
@@ -204,11 +211,14 @@ export function interpolate(y: ArrayLike<number>, x: ArrayLike<number>, options:
     const okForward = direction !== 'backward' && fromPrev <= limit;
     const okBackward = direction !== 'forward' && fromNext <= limit;
     if (!okForward && !okBackward) continue;
-    if (!inside && !extrapolates) {
-      // Linear-type methods hold the edge value, like pandas.
-      if (i < first && direction === 'forward') continue;
-      out[i] = i < first ? y[first] : y[last];
-      continue;
+    if (!inside) {
+      if (edge === 'none') continue;
+      if (edge === 'hold') {
+        if (i < first && direction === 'forward') continue;
+        out[i] = i < first ? y[first] : y[last];
+        continue;
+      }
+      if (edge === 'extrapolate' && i < first && direction === 'forward') continue;
     }
     const v = evaluate(x[i], i);
     if (v === v) out[i] = v;
@@ -257,33 +267,62 @@ function nearestIndex(kx: number[], xv: number): number {
   return k + 1 < kx.length && Math.abs(kx[k + 1] - xv) < Math.abs(xv - kx[k]) ? k + 1 : k;
 }
 
-/** Natural cubic spline through the known points. */
-function naturalCubicSpline(kx: number[], ky: number[]): (xv: number) => number {
+/** Cubic spline with not-a-knot end conditions (scipy's default for 'cubic'). */
+function notAKnotSpline(kx: number[], ky: number[]): (xv: number) => number {
   const n = kx.length;
-  if (n < 3) return (xv) => linearAt(kx, ky, xv);
-  const h = new Float64Array(n - 1);
-  for (let i = 0; i < n - 1; i++) h[i] = kx[i + 1] - kx[i];
-  // Second derivatives m with m0 = m(n-1) = 0: tridiagonal system, Thomas algorithm.
-  const a = new Float64Array(n), b = new Float64Array(n), c = new Float64Array(n), d = new Float64Array(n);
-  b[0] = 1; b[n - 1] = 1;
+  if (n < 4) return localPolynomial(kx, ky, n - 1);
+  const h = Array.from({ length: n - 1 }, (_, i) => kx[i + 1] - kx[i]);
+  // Band matrix (2 sub/super diagonals) for the second derivatives M.
+  const A = Array.from({ length: n }, () => new Float64Array(5)); // A[i][j - i + 2]
+  const rhs = new Float64Array(n);
+  const set = (i: number, j: number, v: number) => { A[i][j - i + 2] = v; };
+  set(0, 0, h[1]); set(0, 1, -(h[0] + h[1])); set(0, 2, h[0]);
   for (let i = 1; i < n - 1; i++) {
-    a[i] = h[i - 1];
-    b[i] = 2 * (h[i - 1] + h[i]);
-    c[i] = h[i];
-    d[i] = 6 * ((ky[i + 1] - ky[i]) / h[i] - (ky[i] - ky[i - 1]) / h[i - 1]);
+    set(i, i - 1, h[i - 1]); set(i, i, 2 * (h[i - 1] + h[i])); set(i, i + 1, h[i]);
+    rhs[i] = 6 * ((ky[i + 1] - ky[i]) / h[i] - (ky[i] - ky[i - 1]) / h[i - 1]);
   }
-  for (let i = 1; i < n; i++) {
-    const w = a[i] / b[i - 1];
-    b[i] -= w * c[i - 1];
-    d[i] -= w * d[i - 1];
+  set(n - 1, n - 3, h[n - 2]); set(n - 1, n - 2, -(h[n - 3] + h[n - 2])); set(n - 1, n - 1, h[n - 3]);
+  // Gaussian elimination within the band (no pivoting needed for these systems in practice).
+  const get = (i: number, j: number) => (Math.abs(j - i) <= 2 ? A[i][j - i + 2] : 0);
+  for (let k = 0; k < n - 1; k++) {
+    for (let i = k + 1; i <= Math.min(k + 2, n - 1); i++) {
+      const f = get(i, k) / get(k, k);
+      if (f === 0) continue;
+      for (let j = k; j <= Math.min(k + 4, n - 1); j++) if (Math.abs(j - i) <= 2) A[i][j - i + 2] -= f * get(k, j);
+      rhs[i] -= f * rhs[k];
+    }
   }
   const m = new Float64Array(n);
-  m[n - 1] = d[n - 1] / b[n - 1];
-  for (let i = n - 2; i >= 0; i--) m[i] = (d[i] - c[i] * m[i + 1]) / b[i];
+  for (let i = n - 1; i >= 0; i--) {
+    let acc = rhs[i];
+    for (let j = i + 1; j <= Math.min(i + 2, n - 1); j++) acc -= get(i, j) * m[j];
+    m[i] = acc / get(i, i);
+  }
   return (xv) => {
-    const k = Math.min(bracket(kx, xv), n - 2);
+    const k = Math.max(0, Math.min(bracket(kx, xv), n - 2));
     const t1 = kx[k + 1] - xv, t0 = xv - kx[k], hk = h[k];
     return (m[k] * t1 ** 3 + m[k + 1] * t0 ** 3) / (6 * hk) + (ky[k] / hk - (m[k] * hk) / 6) * t1 + (ky[k + 1] / hk - (m[k + 1] * hk) / 6) * t0;
+  };
+}
+
+/** Akima (1970) sub-spline, like scipy's Akima1DInterpolator. */
+function akima(kx: number[], ky: number[]): (xv: number) => number {
+  const n = kx.length;
+  if (n < 3) return (xv) => linearAt(kx, ky, xv);
+  const mm = new Float64Array(n + 3); // slopes with two extra on each side: mm[i + 2] = slope i
+  for (let i = 0; i < n - 1; i++) mm[i + 2] = (ky[i + 1] - ky[i]) / (kx[i + 1] - kx[i]);
+  mm[1] = 2 * mm[2] - mm[3]; mm[0] = 2 * mm[1] - mm[2];
+  mm[n + 1] = 2 * mm[n] - mm[n - 1]; mm[n + 2] = 2 * mm[n + 1] - mm[n];
+  const t = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const w1 = Math.abs(mm[i + 3] - mm[i + 2]), w2 = Math.abs(mm[i + 1] - mm[i]);
+    t[i] = w1 + w2 > 1e-9 * Math.max(Math.abs(mm[i + 1]), Math.abs(mm[i + 2]), 1e-300) ? (w1 * mm[i + 1] + w2 * mm[i + 2]) / (w1 + w2) : (mm[i + 1] + mm[i + 2]) / 2;
+  }
+  return (xv) => {
+    const k = Math.max(0, Math.min(bracket(kx, xv), n - 2));
+    const hk = kx[k + 1] - kx[k], s = (xv - kx[k]) / hk;
+    const h00 = (1 + 2 * s) * (1 - s) ** 2, h10 = s * (1 - s) ** 2, h01 = s * s * (3 - 2 * s), h11 = s * s * (s - 1);
+    return h00 * ky[k] + h10 * hk * t[k] + h01 * ky[k + 1] + h11 * hk * t[k + 1];
   };
 }
 
@@ -332,4 +371,28 @@ function pchip(kx: number[], ky: number[]): (xv: number) => number {
     const h00 = (1 + 2 * t) * (1 - t) ** 2, h10 = t * (1 - t) ** 2, h01 = t * t * (3 - 2 * t), h11 = t * t * (t - 1);
     return h00 * ky[k] + h10 * h[k] * dk[k] + h01 * ky[k + 1] + h11 * h[k] * dk[k + 1];
   };
+}
+
+/** Bias-corrected sample skewness (pandas `skew`), ignoring NaN. */
+export function skewness(x: ArrayLike<number>): number {
+  const v = Array.from(x).filter((a) => a === a);
+  const n = v.length;
+  if (n < 3) return NaN;
+  const mean = v.reduce((a, b) => a + b, 0) / n;
+  let m2 = 0, m3 = 0;
+  for (const a of v) { const d = a - mean; m2 += d * d; m3 += d ** 3; }
+  if (m2 === 0) return 0;
+  return (Math.sqrt(n * (n - 1)) / (n - 2)) * ((m3 / n) / (m2 / n) ** 1.5);
+}
+
+/** Bias-corrected excess kurtosis (pandas `kurt`, Fisher's definition), ignoring NaN. */
+export function kurtosis(x: ArrayLike<number>): number {
+  const v = Array.from(x).filter((a) => a === a);
+  const n = v.length;
+  if (n < 4) return NaN;
+  const mean = v.reduce((a, b) => a + b, 0) / n;
+  let m2 = 0, m4 = 0;
+  for (const a of v) { const d = a - mean; m2 += d * d; m4 += d ** 4; }
+  if (m2 === 0) return 0;
+  return ((n + 1) * n * (n - 1)) / ((n - 2) * (n - 3)) * (m4 / (m2 * m2)) - (3 * (n - 1) ** 2) / ((n - 2) * (n - 3));
 }

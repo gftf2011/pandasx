@@ -152,6 +152,6 @@ describe('datetime helpers', () => {
     const r = dateRange('2024-01-30', { periods: 3 });
     assert.deepEqual(r.dt.day.toArray(), [30, 31, 1]);
     const m = dateRange('2024-01-15', { end: '2024-04-01', freq: 'MS' });
-    assert.deepEqual(m.dt.month.toArray(), [1, 2, 3, 4]);
+    assert.deepEqual(m.dt.month.toArray(), [2, 3, 4]);
   });
 });

@@ -2,7 +2,7 @@ import { Column } from './core/column.ts';
 import { Index } from './core/indexes.ts';
 import { argsort, sortKeyFromColumn } from './core/sort.ts';
 import type { Label } from './core/types.ts';
-import { hashKey, isNA } from './core/values.ts';
+import { hashKey } from './core/values.ts';
 import { DataFrame } from './frame.ts';
 import { Series } from './series.ts';
 
@@ -189,38 +189,4 @@ function validate(kind: string, lMap: Map<unknown, number[]>, rMap: Map<unknown,
   const rightUnique = rMap.size === rn || [...rMap].every(([k, v]) => k === null || v.length === 1);
   if ((kind === '1:1' || kind === '1:m') && !leftUnique) throw new Error(`Merge keys are not unique in left dataset; not a ${kind} merge`);
   if ((kind === '1:1' || kind === 'm:1') && !rightUnique) throw new Error(`Merge keys are not unique in right dataset; not a ${kind} merge`);
-}
-
-/** Converts values to the datetime dtype (Date objects, ISO strings or epoch ms). */
-export function toDatetime(values: Series | readonly unknown[], options: { unit?: 'ms' | 's' } = {}): Series {
-  const scale = options.unit === 's' ? 1000 : 1;
-  const conv = (v: unknown) => (isNA(v) ? null : typeof v === 'number' ? v * scale : v instanceof Date ? v : Date.parse(String(v)));
-  if (values instanceof Series) return Series._from(values._col.map(conv, 'datetime'), values.index, values.name);
-  return new Series(values.map(conv), { dtype: 'datetime' });
-}
-
-const FREQ_MS: Record<string, number> = { ms: 1, s: 1000, min: 60_000, h: 3_600_000, D: 86_400_000, W: 7 * 86_400_000 };
-
-/** Evenly spaced datetimes: give `periods` or `end`. `freq` is one of ms, s, min, h, D, W, MS (month start). */
-export function dateRange(start: Date | string, options: { end?: Date | string; periods?: number; freq?: string; name?: string } = {}): Series {
-  const freq = options.freq ?? 'D';
-  const t0 = new Date(start).getTime();
-  const end = options.end !== undefined ? new Date(options.end).getTime() : Infinity;
-  const limit = options.periods ?? Infinity;
-  if (limit === Infinity && end === Infinity) throw new Error('dateRange needs `end` or `periods`');
-  const out: number[] = [];
-  for (let k = 0; out.length < limit; k++) {
-    let t: number;
-    if (freq === 'MS' || freq === 'M') {
-      const d = new Date(t0);
-      t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + k, 1);
-    } else {
-      const step = FREQ_MS[freq];
-      if (!step) throw new Error(`Unsupported frequency: ${freq}`);
-      t = t0 + k * step;
-    }
-    if (t > end) break;
-    out.push(t);
-  }
-  return Series._from(new Column('datetime', Float64Array.from(out)), Index.range(out.length), options.name ?? null);
 }

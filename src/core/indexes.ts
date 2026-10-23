@@ -1,4 +1,6 @@
 import type { Label } from './types.ts';
+import { Column } from './column.ts';
+import { Series } from '../series.ts';
 import { compareValues, hashKey } from './values.ts';
 
 /**
@@ -13,16 +15,19 @@ export class Index {
   readonly names: readonly (string | null)[] | null;
   /** True for the default 0..n-1 index. */
   readonly isDefault: boolean;
+  /** Time zone in which datetime labels are displayed / binned (null = naive). */
+  readonly tz: string | null;
   private lookup: Map<unknown, number[]> | null = null;
 
   constructor(
     labels: readonly Label[],
-    options: { name?: string | null; names?: readonly (string | null)[] | null; isDefault?: boolean } = {},
+    options: { name?: string | null; names?: readonly (string | null)[] | null; isDefault?: boolean; tz?: string | null } = {},
   ) {
     this.labels = labels;
     this.name = options.name ?? null;
     this.names = options.names ?? null;
     this.isDefault = options.isDefault ?? false;
+    this.tz = options.tz ?? null;
   }
 
   static range(n: number, start = 0): Index {
@@ -89,7 +94,7 @@ export class Index {
   take(positions: ArrayLike<number>): Index {
     const out = new Array<Label>(positions.length);
     for (let i = 0; i < positions.length; i++) out[i] = positions[i] < 0 ? null : this.labels[positions[i]];
-    return new Index(out, { name: this.name, names: this.names });
+    return new Index(out, { name: this.name, names: this.names, tz: this.tz });
   }
 
   /** Sorted union of labels (order of appearance if labels cannot be sorted meaningfully). */
@@ -105,7 +110,24 @@ export class Index {
   }
 
   rename(name: string | null): Index {
-    return new Index(this.labels, { name, names: this.names, isDefault: this.isDefault });
+    return new Index(this.labels, { name, names: this.names, isDefault: this.isDefault, tz: this.tz });
+  }
+
+  /** Labels as a Series (indexed by themselves), e.g. to use `.dt` on a datetime index. */
+  toSeries(): Series {
+    const col = Column.from(this.labels);
+    return Series._from(this.tz && col.dtype === 'datetime' ? new Column('datetime', col.data, { tz: this.tz }) : col, this, this.name);
+  }
+
+  /** Whether labels never decrease. */
+  get isMonotonicIncreasing(): boolean {
+    for (let i = 1; i < this.length; i++) if (compareValues(this.labels[i - 1], this.labels[i]) > 0) return false;
+    return true;
+  }
+
+  get isMonotonicDecreasing(): boolean {
+    for (let i = 1; i < this.length; i++) if (compareValues(this.labels[i - 1], this.labels[i]) < 0) return false;
+    return true;
   }
 
   toArray(): Label[] {

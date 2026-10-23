@@ -89,14 +89,16 @@ describe('string methods', () => {
     assert.deepEqual(all.get('0').toArray(), ['1', '2', '3']);
   });
   it('predicates and transforms', () => {
-    assert.deepEqual(s.str.match(/[A-Z]/).toArray(), [true, false, null, true]);
-    assert.deepEqual(s.str.fullmatch('[a-z]+').toArray(), [false, true, null, false]);
+    assert.deepEqual(s.str.match(/[A-Z]/).toArray(), [true, false, false, true]);
+    assert.deepEqual(s.str.fullmatch('[a-z]+').toArray(), [false, true, false, false]);
     assert.deepEqual(s.str.contains('a', { case: false, na: false }).toArray(), [true, false, false, true]);
     assert.deepEqual(s.str.title().toArray(), ['Ana Maria', 'Bruno', null, 'Carla-Souza']);
     assert.deepEqual(s.str.swapcase().iat(1), 'BRUNO');
     assert.deepEqual(s.str.findall(/a/i).iat(0), ['A', 'a', 'a', 'a']);
     assert.deepEqual(s.str.find('a').toArray(), [2, -1, NaN, 10]);
-    assert.deepEqual(new Series(['  x ']).str.center(7, '*').iat(0), '*  x ***'.slice(0, 7));
+    assert.deepEqual(new Series(['  x ']).str.center(7, '*').iat(0), '**  x *');
+    assert.deepEqual(new Series(['a1b22']).str.title().iat(0), 'A1B22');
+    assert.deepEqual(new Series(['x', null], { dtype: 'object' }).str.contains('x').toArray(), [true, null]);
     assert.deepEqual(new Series(['-5']).str.zfill(4).iat(0), '-005');
     assert.deepEqual(new Series(['prefix_x']).str.removeprefix('prefix_').iat(0), 'x');
     assert.deepEqual(new Series(['aaa']).str.replace('a', 'b', { n: 2 }).iat(0), 'bba');

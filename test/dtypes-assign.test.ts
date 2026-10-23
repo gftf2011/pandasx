@@ -171,7 +171,7 @@ describe('timedelta and period primitives', () => {
     assert.equal(new Timedelta('1 days 02:03:04').ms, 93_784_000);
     assert.equal(new Timedelta('1h30min').ms, 5_400_000);
     assert.equal(new Timedelta({ days: 1, hours: 2 }).toString(), '1 days 02:00:00');
-    assert.equal(new Timedelta(-1, 'h').toString(), '-1 days 23:00:00');
+    assert.equal(new Timedelta(-1, 'h').toString(), '-1 days +23:00:00');
     assert.equal(new Timedelta('P1DT2H').ms, 93_600_000);
   });
 

@@ -56,7 +56,7 @@ export class Timedelta {
     const s = Math.floor(rest / 1000); rest -= s * 1000;
     const p = (n: number) => String(n).padStart(2, '0');
     const frac = rest > 0 ? '.' + String(Math.round(rest * 1000)).padStart(6, '0') : '';
-    return `${days} days ${p(h)}:${p(m)}:${p(s)}${frac}`;
+    return `${days} days ${days < 0 ? '+' : ''}${p(h)}:${p(m)}:${p(s)}${frac}`;
   }
 
   /** ISO 8601 duration, e.g. `P1DT2H3M4S`. */

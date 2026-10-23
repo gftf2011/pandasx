@@ -1,6 +1,7 @@
 import type { Column } from './column.ts';
 import type { Index } from './indexes.ts';
 import { Period, Timedelta } from './time.ts';
+import { formatOffset, tzOffset } from './tz.ts';
 import { NULLABLE_DTYPES, type Label } from './types.ts';
 
 export const DISPLAY = {
@@ -19,9 +20,11 @@ export function displayPositions(n: number, max: number, keep: number): (number 
   return [...head, null, ...tail];
 }
 
-function formatDate(t: number, dateOnly: boolean): string {
-  const iso = new Date(t).toISOString();
-  return dateOnly ? iso.slice(0, 10) : iso.slice(0, 19).replace('T', ' ');
+function formatDate(t: number, dateOnly: boolean, withMs = false, tz: string | null = null): string {
+  const off = tz ? tzOffset(t, tz) : 0;
+  const iso = new Date(t + off).toISOString();
+  if (dateOnly && !tz) return iso.slice(0, 10);
+  return iso.slice(0, withMs ? 23 : 19).replace('T', ' ') + (tz ? formatOffset(off) : '');
 }
 
 export function formatScalar(v: unknown): string {
@@ -62,8 +65,10 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
     };
   } else if (col.dtype === 'datetime') {
     const data = col.data as Float64Array;
+    const tz = col.meta.tz ?? null;
     const dateOnly = rows.every((p) => Number.isNaN(data[p]) || data[p] % 86_400_000 === 0);
-    fmt = (p) => (Number.isNaN(data[p]) ? 'NaT' : formatDate(data[p], dateOnly));
+    const withMs = rows.some((p) => data[p] === data[p] && data[p] % 1000 !== 0);
+    fmt = (p) => (Number.isNaN(data[p]) ? 'NaT' : formatDate(data[p], dateOnly, withMs, tz));
   } else if (col.dtype === 'Int64' || col.dtype === 'boolean') {
     fmt = (p) => (col.isNA(p) ? na : formatScalar(col.get(p)));
   } else if (col.dtype === 'timedelta' || col.dtype === 'period') {
@@ -84,15 +89,15 @@ export function formatIndex(index: Index, positions: readonly (number | null)[])
     const label = p === null ? null : index.labels[p];
     for (let l = 0; l < levels; l++) {
       if (p === null) out[l].push('...');
-      else if (levels > 1) out[l].push(formatLabel((label as readonly Label[])[l]));
-      else out[l].push(formatLabel(label));
+      else if (levels > 1) out[l].push(formatLabel((label as readonly Label[])[l], index.tz));
+      else out[l].push(formatLabel(label, index.tz));
     }
   }
   return out;
 }
 
-function formatLabel(l: Label): string {
-  if (l instanceof Date) return formatDate(l.getTime(), l.getTime() % 86_400_000 === 0);
+function formatLabel(l: Label, tz: string | null = null): string {
+  if (l instanceof Date) return Number.isNaN(l.getTime()) ? 'NaT' : formatDate(l.getTime(), l.getTime() % 86_400_000 === 0, l.getTime() % 1000 !== 0, tz);
   return formatScalar(l);
 }
 

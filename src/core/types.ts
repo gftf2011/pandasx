@@ -1,3 +1,5 @@
+import type { Period, Timedelta } from './time.ts';
+
 /**
  * Logical data types, mirroring pandas dtypes.
  *
@@ -32,7 +34,7 @@ export type DType =
   | 'object';
 
 /** A row or column label. Tuples are the labels of a MultiIndex. */
-export type Label = string | number | boolean | Date | bigint | null | readonly Label[];
+export type Label = string | number | boolean | Date | bigint | null | Period | Timedelta | readonly Label[];
 
 /** Backing storage of a column. */
 export type Storage = Float64Array | Uint8Array | Int32Array | unknown[];

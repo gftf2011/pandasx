@@ -1,7 +1,9 @@
 export { Series, KeyError, type SeriesInput, type SeriesOptions, type Mask, type Operand } from './series.ts';
 export { DataFrame, type FrameInput, type FrameOptions, type AxisAggOptions } from './frame.ts';
 export { DataFrameGroupBy, SeriesGroupBy, type GroupByOptions, type AggSpec } from './groupby.ts';
-export { concat, merge, toDatetime, dateRange, type ConcatOptions, type MergeOptions } from './reshape.ts';
+export { concat, merge, type ConcatOptions, type MergeOptions } from './reshape.ts';
+export { toDatetime, toTimedelta, dateRange, bdateRange, periodRange, timedeltaRange, type ToDatetimeOptions, type DateRangeOptions } from './datetimes.ts';
+export { offsets, toOffset, DateOffset, type BusinessOptions } from './core/offsets.ts';
 export { readCsv, parseCsv, toCsv, type ReadCsvOptions, type ToCsvOptions } from './io/csv.ts';
 export { readJson, toJson, type JsonOrient } from './io/json.ts';
 export { Index, Slice, slice } from './core/indexes.ts';

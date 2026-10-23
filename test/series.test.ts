@@ -219,7 +219,7 @@ describe('accessors', () => {
   it('str methods keep NA', () => {
     const s = new Series([' Foo ', 'bar', null]);
     assert.deepEqual(s.str.strip().str.lower().toArray(), ['foo', 'bar', null]);
-    assert.deepEqual(s.str.contains('a').toArray(), [false, true, null]);
+    assert.deepEqual(s.str.contains('a').toArray(), [false, true, false]);
     assert.deepEqual(s.str.len().toArray(), [5, 3, NaN]);
     assert.deepEqual(new Series(['a-b', 'c-d']).str.split('-').str.get(1).toArray(), ['b', 'd']);
     assert.deepEqual(new Series(['ab12', 'x9']).str.extract(/(\d+)/, { expand: false }).toArray(), ['12', '9']);

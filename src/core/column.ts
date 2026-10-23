@@ -10,6 +10,8 @@ export interface ColumnMeta {
   ordered?: boolean;
   /** `period`: the frequency. */
   freq?: PeriodFreq;
+  /** `datetime`: IANA time zone or fixed offset the instants are viewed in (null = naive). */
+  tz?: string | null;
 }
 
 /**
