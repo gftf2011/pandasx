@@ -6,7 +6,7 @@
  * custom properties, hairline recessive grid, 2px lines, <= 24px bars with
  * rounded data ends and 2px surface gaps, >= 8px dots with a surface ring,
  * a legend for two or more series plus selective direct labels, and native
- * per-mark tooltips (<title>). There is deliberately no secondary y axis.
+ * per-mark tooltips (`<title>`). There is deliberately no secondary y axis.
  */
 import { writeFileSync } from 'node:fs';
 import { quantile } from './core/aggregate.ts';

@@ -16,8 +16,11 @@ import { labelPositions, Series, type RowSelector } from './series.ts';
 
 /** Columns, or `{ rows, columns }` (rows by label, mask or slice). */
 export type Subset = string | readonly string[] | { rows?: RowSelector; columns?: string | readonly string[] };
-type Axis = 0 | 1 | 'index' | 'columns' | 'rows' | null;
-type Formatter = string | ((v: unknown) => string);
+/** Styler axis: 0 / 'index' per column, 1 / 'columns' per row, null for the whole table. */
+export type StyleAxis = 0 | 1 | 'index' | 'columns' | 'rows' | null;
+type Axis = StyleAxis;
+/** A Python format template ('{:,.2f}') or a function. */
+export type Formatter = string | ((v: unknown) => string);
 
 const isRowsAxis = (a: Axis | undefined) => a === 1 || a === 'columns';
 

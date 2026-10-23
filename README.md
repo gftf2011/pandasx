@@ -2,6 +2,8 @@
 
 [pandas](https://pandas.pydata.org/)-style `Series` and `DataFrame` for Node.js, written in TypeScript.
 
+📖 **Documentation: [gftf2011.github.io/pandasx](https://gftf2011.github.io/pandasx/)** — guides with runnable examples and the full API reference.
+
 - **Columnar, typed storage**: numbers and dates in `Float64Array`, booleans in `Uint8Array`, categories in `Int32Array`.
 - **Faithful to the pandas API**, with camelCase names (`sort_values` → `sortValues`, `read_csv` → `readCsv`).
 - **Checked against real pandas**: 214 parity cases (`npm run parity`) plus fixtures written by pandas 3.1.

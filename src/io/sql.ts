@@ -13,8 +13,10 @@ import { toDatetime } from '../datetimes.ts';
 import { requireOptional } from './source.ts';
 
 type Row = Record<string, unknown>;
-interface SyncDb { prepare(sql: string): { all(...p: unknown[]): unknown[]; run(...p: unknown[]): unknown } ; exec?(sql: string): unknown; close?(): void }
-interface AsyncDb { query(sql: string, params?: unknown[]): unknown }
+/** A synchronous SQLite-style connection (node:sqlite DatabaseSync, better-sqlite3). */
+export interface SyncDb { prepare(sql: string): { all(...p: unknown[]): unknown[]; run(...p: unknown[]): unknown } ; exec?(sql: string): unknown; close?(): void }
+/** A client with `query(sql, params)` (pg, mysql2/promise, or your own adapter). */
+export interface AsyncDb { query(sql: string, params?: unknown[]): unknown }
 export type SqlConnection = string | SyncDb | AsyncDb;
 
 export type SqlDialect = 'sqlite' | 'postgres' | 'mysql' | 'generic';

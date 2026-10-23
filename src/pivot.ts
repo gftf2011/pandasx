@@ -7,19 +7,20 @@ import { isNumericDType, type AggName, type DType, type Label } from './core/typ
 import { compareValues, hashKey, isNA } from './core/values.ts';
 import { DataFrame } from './frame.ts';
 import { computeGroups } from './groupby.ts';
-import { numericView, Series } from './series.ts';
+import { numericView, Series, type AggFunc } from './series.ts';
 
-type AggFn = AggName | 'len' | ((s: Series) => unknown);
+/** Aggregation for pivotTable / crosstab: any AggFunc, or 'len'. */
+export type PivotAggFunc = AggFunc | 'len';
 
 const list = <T>(v: T | readonly T[] | undefined): T[] => (v === undefined ? [] : Array.isArray(v) ? [...v] : [v as T]);
-const fname = (f: AggFn, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
+const fname = (f: PivotAggFunc, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
 
 export interface PivotTableOptions {
   index: string | readonly string[];
   columns?: string | readonly string[];
   values?: string | readonly string[];
   /** Aggregation: name, function, list of them, or `{value: func | func[]}` (default 'mean'). */
-  aggfunc?: AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>;
+  aggfunc?: PivotAggFunc | readonly PivotAggFunc[] | Record<string, PivotAggFunc | readonly PivotAggFunc[]>;
   /** Value for missing cells. */
   fillValue?: unknown;
   /** Add row and column totals named `marginsName` ('All'). */
@@ -29,7 +30,7 @@ export interface PivotTableOptions {
   dropna?: boolean;
 }
 
-interface Measure { value: string; func: AggFn; label: string[] }
+interface Measure { value: string; func: PivotAggFunc; label: string[] }
 
 /** Spreadsheet-style pivot table, like `pd.pivot_table`. */
 export function pivotTable(df: DataFrame, o: PivotTableOptions): DataFrame {
@@ -39,7 +40,7 @@ export function pivotTable(df: DataFrame, o: PivotTableOptions): DataFrame {
   const aggfunc = o.aggfunc ?? 'mean';
   const dropna = o.dropna ?? true;
   const marginsName = o.marginsName ?? 'All';
-  const isNumericAgg = (f: AggFn) => typeof f === 'string' && NUMERIC_AGGS.has(f as AggName);
+  const isNumericAgg = (f: PivotAggFunc) => typeof f === 'string' && NUMERIC_AGGS.has(f as AggName);
   const candidates = df.columns.filter((c) => !idx.includes(c) && !cols.includes(c));
   const allFuncs = Array.isArray(aggfunc) ? aggfunc : typeof aggfunc === 'object' ? Object.values(aggfunc).flat() : [aggfunc];
   // pandas orders the value columns by name.
@@ -47,15 +48,15 @@ export function pivotTable(df: DataFrame, o: PivotTableOptions): DataFrame {
     : candidates.filter((c) => !allFuncs.some(isNumericAgg) || isNumericDType(df._column(c).dtype))).sort();
 
   const measures: Measure[] = [];
-  if (Array.isArray(aggfunc)) (aggfunc as readonly AggFn[]).forEach((f, i) => values.forEach((v) => measures.push({ value: v, func: f, label: [fname(f, i), v] })));
+  if (Array.isArray(aggfunc)) (aggfunc as readonly PivotAggFunc[]).forEach((f, i) => values.forEach((v) => measures.push({ value: v, func: f, label: [fname(f, i), v] })));
   else if (typeof aggfunc === 'object') {
     for (const v of values) {
-      const f = (aggfunc as Record<string, AggFn | readonly AggFn[]>)[v];
+      const f = (aggfunc as Record<string, PivotAggFunc | readonly PivotAggFunc[]>)[v];
       if (f === undefined) continue;
-      if (Array.isArray(f)) (f as readonly AggFn[]).forEach((g, i) => measures.push({ value: v, func: g, label: [v, fname(g, i)] }));
-      else measures.push({ value: v, func: f as AggFn, label: [v] });
+      if (Array.isArray(f)) (f as readonly PivotAggFunc[]).forEach((g, i) => measures.push({ value: v, func: g, label: [v, fname(g, i)] }));
+      else measures.push({ value: v, func: f as PivotAggFunc, label: [v] });
     }
-  } else values.forEach((v) => measures.push({ value: v, func: aggfunc as AggFn, label: [v] }));
+  } else values.forEach((v) => measures.push({ value: v, func: aggfunc as PivotAggFunc, label: [v] }));
   const dropValueLevel = typeof o.values === 'string' && !Array.isArray(aggfunc) && typeof aggfunc !== 'object';
 
   // Group rows by the full key; margins reuse unions of these groups.
@@ -122,7 +123,7 @@ export function pivotTable(df: DataFrame, o: PivotTableOptions): DataFrame {
 
 export interface CrosstabOptions {
   values?: Series | readonly unknown[];
-  aggfunc?: AggFn;
+  aggfunc?: PivotAggFunc;
   rownames?: readonly string[];
   colnames?: readonly string[];
   margins?: boolean;
@@ -132,7 +133,8 @@ export interface CrosstabOptions {
   dropna?: boolean;
 }
 
-type Factor = Series | readonly unknown[];
+/** A crosstab factor: a Series or an array of values. */
+export type Factor = Series | readonly unknown[];
 
 /** Frequency table of two (or more) factors, like `pd.crosstab`. */
 export function crosstab(index: Factor | readonly Factor[], columns: Factor | readonly Factor[], o: CrosstabOptions = {}): DataFrame {

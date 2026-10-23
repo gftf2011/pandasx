@@ -15,9 +15,9 @@ import type { Interval } from './interval.ts';
  * - `timedelta` Float64Array of milliseconds, missing = NaN (NaT)
  * - `period`    Float64Array of period ordinals, missing = NaN; frequency in column metadata
  * - `category`  Int32Array of codes into `categories`, missing = -1
- * - `bigint`    Array<bigint | null>, exact integers of any size
- * - `string`    Array<string | null>, missing = null
- * - `object`    Array<unknown>, missing = null / undefined / NaN
+ * - `bigint`    `Array<bigint | null>`, exact integers of any size
+ * - `string`    `Array<string | null>`, missing = null
+ * - `object`    `Array<unknown>`, missing = null / undefined / NaN
  */
 export type DType =
   | 'float64'

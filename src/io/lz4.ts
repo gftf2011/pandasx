@@ -70,6 +70,29 @@ export function lz4Decode(data: Uint8Array): Uint8Array {
   return out;
 }
 
+/** Decodes one raw LZ4 block (no frame) of known decompressed size, e.g. Parquet LZ4_RAW pages. */
+export function lz4BlockDecode(data: Uint8Array, size: number): Uint8Array {
+  const out = new Uint8Array(size);
+  decodeBlock(data, out, 0);
+  return out;
+}
+
+/** Encodes a raw LZ4 block holding only literals: valid for any LZ4 block decoder. */
+export function lz4BlockEncodeLiterals(data: Uint8Array): Uint8Array {
+  const n = data.length;
+  const extra = n >= 15 ? Math.floor((n - 15) / 255) + 1 : 0;
+  const out = new Uint8Array(1 + extra + n);
+  out[0] = Math.min(n, 15) << 4;
+  let p = 1;
+  if (n >= 15) {
+    let rest = n - 15;
+    while (rest >= 255) { out[p++] = 255; rest -= 255; }
+    out[p++] = rest;
+  }
+  out.set(data, p);
+  return out;
+}
+
 /** Encodes as an LZ4 frame of stored (uncompressed) blocks: valid for any LZ4 reader. */
 export function lz4EncodeStored(data: Uint8Array): Uint8Array {
   const BLOCK = 4_194_304;

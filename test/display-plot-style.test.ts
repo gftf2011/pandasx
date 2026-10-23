@@ -55,7 +55,7 @@ describe('text exports', () => {
   });
   it('memoryUsage and info', () => {
     assert.deepEqual(small().memoryUsage().toArray(), [132, 16, 16, 16]);
-    assert.ok(small().info().endsWith('memory usage: 180.0 bytes+'));
+    assert.ok(small().info().endsWith('memory usage: 180.0+ bytes'));
   });
 });
 

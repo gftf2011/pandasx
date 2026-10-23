@@ -49,6 +49,7 @@ describe('stack / unstack / pivot', () => {
     const u = s.unstack({ fillValue: 0 });
     assert.deepEqual(u.columns, ['a', 'b']);
     assert.deepEqual(u.values, [[0, 4], [12, 7], [5, 3]]);
+    assert.deepEqual((u as DataFrame).dtypes.toArray(), ['int64', 'int64']); // fill keeps int, like pandas
     assert.deepEqual(s.unstack({ level: 0 }).columns, ['E', 'N', 'S']);
   });
   it('stack round trip', () => {

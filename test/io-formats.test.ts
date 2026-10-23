@@ -136,6 +136,12 @@ describe('optional binary formats', () => {
     assert.deepEqual(sub.columns, ['f']);
     assert.deepEqual(sub.index.toArray(), ['r1', 'r2', 'r3']);
   });
+  it('Parquet: gzip / brotli / zstd / lz4 pages, read and written', async () => {
+    for (const codec of ['gzip', 'brotli', 'zstd', 'lz4'] as const) {
+      sameData(await pd.readParquet(fx(`pandas_${codec}.parquet`)), expected());
+      sameData(await pd.readParquet(await expected().toParquet(undefined, { compression: codec })), expected());
+    }
+  });
   it('Feather: reads pandas (lz4) files and round-trips', async () => {
     const df = await pd.readFeather(fx('pandas.feather'));
     assert.deepEqual(df.dtypes.toArray(), ['string', 'int64', 'float64', 'string', 'bool', 'datetime', 'Int64', 'category']);

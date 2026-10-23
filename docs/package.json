@@ -1,0 +1,19 @@
+{
+  "name": "pandasx-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api": "typedoc && node scripts/fix-api.mjs",
+    "examples": "node scripts/run-examples.mjs",
+    "dev": "npm run api && vitepress dev",
+    "build": "npm run api && npm run examples -- --check && vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "typedoc": "0.28.20",
+    "typedoc-plugin-markdown": "4.13.1",
+    "typedoc-vitepress-theme": "1.1.4",
+    "typescript": "5.9.3",
+    "vitepress": "1.6.4"
+  }
+}

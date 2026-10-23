@@ -27,7 +27,9 @@ export interface BusinessOptions {
   weekmask?: string;
 }
 
-type Kind = 'tick' | 'anchored' | 'relative';
+/** Fixed-length ('tick'), calendar-anchored, or relative (DateOffset) offset. */
+export type OffsetKind = 'tick' | 'anchored' | 'relative';
+type Kind = OffsetKind;
 
 /** A calendar offset. `n` repeats it (negative goes backwards). */
 export class DateOffset {

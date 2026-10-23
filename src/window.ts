@@ -28,13 +28,14 @@ export interface RollingOptions {
   step?: number;
 }
 
-type Target = Series | DataFrame;
+/** What windows and resamplers operate on. */
+export type WindowTarget = Series | DataFrame;
 type Bounds = { start: Int32Array; end: Int32Array };
 
 /** A kernel reduces values[start[i]..end[i]) for every row. */
 type Kernel = (x: Float64Array, b: Bounds, minp: number) => Float64Array;
 
-abstract class Window<T extends Target = Target> {
+abstract class Window<T extends WindowTarget = WindowTarget> {
   protected readonly target: T;
   protected readonly on: string | undefined;
 
@@ -118,9 +119,9 @@ abstract class Window<T extends Target = Target> {
   }
 
   /** One aggregation name or a list (DataFrame of results for a Series). */
-  agg(func: string | readonly string[]): Target {
-    const one = (f: string): Target => {
-      const m = (this as unknown as Record<string, () => Target>)[f];
+  agg(func: string | readonly string[]): WindowTarget {
+    const one = (f: string): WindowTarget => {
+      const m = (this as unknown as Record<string, () => WindowTarget>)[f];
       if (typeof m !== 'function') throw new Error(`Unknown window aggregation: ${f}`);
       return m.call(this);
     };
@@ -171,7 +172,7 @@ function covOf(x: number[], y: number[], ddof: number): number {
 }
 
 /** Fixed-size or time-based rolling window (`series.rolling(3)`, `df.rolling('2D')`). */
-export class Rolling<T extends Target = Target> extends Window<T> {
+export class Rolling<T extends WindowTarget = WindowTarget> extends Window<T> {
   private readonly size: number;
   private readonly timeBased: boolean;
   private readonly options: RollingOptions;
@@ -278,7 +279,7 @@ function weightedVar(v: number[], w: number[], ddof: number): number {
 }
 
 /** Expanding window: everything up to the current row (`series.expanding()`). */
-export class Expanding<T extends Target = Target> extends Window<T> {
+export class Expanding<T extends WindowTarget = WindowTarget> extends Window<T> {
   private readonly minp: number;
 
   constructor(target: T, options: { minPeriods?: number } = {}) {
@@ -517,7 +518,7 @@ export interface EwmOptions {
 }
 
 /** Exponentially weighted window (`series.ewm({ span: 10 }).mean()`). */
-export class EWM<T extends Target = Target> {
+export class EWM<T extends WindowTarget = WindowTarget> {
   private readonly target: T;
   private readonly alpha: number;
   private readonly adjust: boolean;

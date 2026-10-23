@@ -72,17 +72,18 @@ function tokenize(src: string): Token[] {
   return out;
 }
 
-type Node =
+/** Parsed expression tree returned by parseExpression. */
+export type ExprNode =
   | { k: 'lit'; v: unknown }
   | { k: 'name'; v: string }
   | { k: 'local'; v: string }
-  | { k: 'list'; items: Node[] }
-  | { k: 'unary'; op: string; arg: Node }
-  | { k: 'bin'; op: string; l: Node; r: Node }
-  | { k: 'cmp'; ops: string[]; args: Node[] }
-  | { k: 'attr'; obj: Node; name: string }
-  | { k: 'call'; fn: Node; args: Node[]; kwargs: Record<string, Node> }
-  | { k: 'index'; obj: Node; key: Node };
+  | { k: 'list'; items: ExprNode[] }
+  | { k: 'unary'; op: string; arg: ExprNode }
+  | { k: 'bin'; op: string; l: ExprNode; r: ExprNode }
+  | { k: 'cmp'; ops: string[]; args: ExprNode[] }
+  | { k: 'attr'; obj: ExprNode; name: string }
+  | { k: 'call'; fn: ExprNode; args: ExprNode[]; kwargs: Record<string, ExprNode> }
+  | { k: 'index'; obj: ExprNode; key: ExprNode };
 
 const CONSTANTS: Record<string, unknown> = { True: true, False: false, true: true, false: false, None: null, null: null, NaN: NaN, nan: NaN, inf: Infinity };
 
@@ -103,33 +104,33 @@ class Parser {
     this.pos++;
   }
 
-  parse(): Node {
+  parse(): ExprNode {
     const n = this.or();
     if (this.peek().t !== 'eof') throw new SyntaxError(`Unexpected token in expression: ${JSON.stringify(this.peek())}`);
     return n;
   }
 
-  private or(): Node {
+  private or(): ExprNode {
     let l = this.and();
     while (this.isOp('|') || this.isWord('or')) { this.pos++; l = { k: 'bin', op: 'or', l, r: this.and() }; }
     return l;
   }
 
-  private and(): Node {
+  private and(): ExprNode {
     let l = this.not();
     while (this.isOp('&') || this.isWord('and')) { this.pos++; l = { k: 'bin', op: 'and', l, r: this.not() }; }
     return l;
   }
 
-  private not(): Node {
+  private not(): ExprNode {
     if (this.isOp('~') || this.isWord('not')) { this.pos++; return { k: 'unary', op: 'not', arg: this.not() }; }
     return this.comparison();
   }
 
-  private comparison(): Node {
+  private comparison(): ExprNode {
     const first = this.additive();
     const ops: string[] = [];
-    const args: Node[] = [first];
+    const args: ExprNode[] = [first];
     for (;;) {
       const t = this.peek();
       let op: string | null = null;
@@ -143,13 +144,13 @@ class Parser {
     return ops.length ? { k: 'cmp', ops, args } : first;
   }
 
-  private additive(): Node {
+  private additive(): ExprNode {
     let l = this.term();
     while (this.isOp('+') || this.isOp('-')) { const op = this.next() as { v: string }; l = { k: 'bin', op: op.v, l, r: this.term() }; }
     return l;
   }
 
-  private term(): Node {
+  private term(): ExprNode {
     let l = this.unary();
     while (this.isOp('*') || this.isOp('/') || this.isOp('//') || this.isOp('%')) {
       const op = this.next() as { v: string };
@@ -158,19 +159,19 @@ class Parser {
     return l;
   }
 
-  private unary(): Node {
+  private unary(): ExprNode {
     if (this.isOp('-')) { this.pos++; return { k: 'unary', op: 'neg', arg: this.unary() }; }
     if (this.isOp('+')) { this.pos++; return this.unary(); }
     return this.power();
   }
 
-  private power(): Node {
+  private power(): ExprNode {
     const base = this.postfix();
     if (this.isOp('**')) { this.pos++; return { k: 'bin', op: '**', l: base, r: this.unary() }; }
     return base;
   }
 
-  private postfix(): Node {
+  private postfix(): ExprNode {
     let n = this.atom();
     for (;;) {
       if (this.isOp('.')) {
@@ -180,8 +181,8 @@ class Parser {
         n = { k: 'attr', obj: n, name: t.v };
       } else if (this.isOp('(')) {
         this.pos++;
-        const args: Node[] = [];
-        const kwargs: Record<string, Node> = {};
+        const args: ExprNode[] = [];
+        const kwargs: Record<string, ExprNode> = {};
         while (!this.isOp(')')) {
           const t = this.peek();
           if (t.t === 'id' && this.tokens[this.pos + 1]?.t === 'op' && (this.tokens[this.pos + 1] as { v: string }).v === '=') {
@@ -201,7 +202,7 @@ class Parser {
     }
   }
 
-  private atom(): Node {
+  private atom(): ExprNode {
     const t = this.next();
     switch (t.t) {
       case 'num': return { k: 'lit', v: t.v };
@@ -221,7 +222,7 @@ class Parser {
           return first;
         }
         if (t.v === '[') {
-          const items: Node[] = [];
+          const items: ExprNode[] = [];
           while (!this.isOp(']')) { items.push(this.or()); if (!this.isOp(']')) this.expect(','); }
           this.pos++;
           return { k: 'list', items };
@@ -231,7 +232,7 @@ class Parser {
   }
 }
 
-export function parseExpression(src: string): Node {
+export function parseExpression(src: string): ExprNode {
   return new Parser(tokenize(src)).parse();
 }
 
@@ -251,7 +252,7 @@ const MATH_FUNCS: Record<string, (x: number) => number> = {
 
 const snakeToCamel = (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 
-function evaluateNode(n: Node, ctx: EvalContext): unknown {
+function evaluateNode(n: ExprNode, ctx: EvalContext): unknown {
   switch (n.k) {
     case 'lit': return n.v;
     case 'list': return n.items.map((i) => evaluateNode(i, ctx));

@@ -117,7 +117,7 @@ export function findAll(node: MNode, pred: (n: MNode) => boolean, out: MNode[] =
   return out;
 }
 
-/** Concatenated text of a node; block elements and <br> become spaces when `spacing`. */
+/** Concatenated text of a node; block elements and `<br>` become spaces when `spacing`. */
 export function textContent(node: MNode | string): string {
   if (typeof node === 'string') return node;
   if (node.tag === 'br') return '\n';

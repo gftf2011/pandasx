@@ -11,6 +11,29 @@ import { isNA } from '../core/values.ts';
 import { DataFrame } from '../frame.ts';
 import { readBytes, requireOptional, type Source } from './source.ts';
 
+type Codec = (input: Uint8Array, outputLength: number) => Uint8Array;
+
+/** Parquet page codecs beyond hyparquet's built-in Snappy, all from node:zlib (plus LZ4_RAW). */
+async function parquetCodecs(): Promise<{ read: Record<string, Codec>; write: Record<string, (input: Uint8Array) => Uint8Array> }> {
+  const zlib = await import('node:zlib');
+  const { lz4BlockDecode, lz4BlockEncodeLiterals } = await import('./lz4.ts');
+  const u8 = (b: Uint8Array) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  return {
+    read: {
+      GZIP: (d) => u8(zlib.gunzipSync(d)),
+      BROTLI: (d) => u8(zlib.brotliDecompressSync(d)),
+      ZSTD: (d) => u8(zlib.zstdDecompressSync(d)),
+      LZ4_RAW: (d, n) => lz4BlockDecode(d, n),
+    },
+    write: {
+      GZIP: (d) => u8(zlib.gzipSync(d)),
+      BROTLI: (d) => u8(zlib.brotliCompressSync(d)),
+      ZSTD: (d) => u8(zlib.zstdCompressSync(d)),
+      LZ4_RAW: lz4BlockEncodeLiterals,
+    },
+  };
+}
+
 interface PandasColumnMeta { name: string | null; field_name: string; pandas_type: string; numpy_type: string; metadata: Record<string, unknown> | null }
 interface PandasMeta {
   index_columns: (string | { kind: 'range'; name: string | null; start: number; stop: number; step: number })[];
@@ -141,7 +164,8 @@ export async function readParquet(source: Source, o: ReadParquetOptions = {}): P
   const fields = metadata.schema.slice(1).filter((e) => !e.num_children).map((e) => e.name);
   const indexFields = (meta?.index_columns ?? []).filter((c): c is string => typeof c === 'string');
   const wanted = o.columns ? [...new Set([...o.columns, ...indexFields])].filter((c) => fields.includes(c)) : fields;
-  const rows = await h.parquetReadObjects({ file, metadata, columns: wanted, rowStart: o.rowStart, rowEnd: o.rowEnd });
+  const compressors = (await parquetCodecs()).read;
+  const rows = await h.parquetReadObjects({ file, metadata, columns: wanted, rowStart: o.rowStart, rowEnd: o.rowEnd, compressors });
   const columns: [string, unknown[]][] = wanted.map((f) => [f, rows.map((r) => (r as Record<string, unknown>)[f])]);
   const df = assemble(columns, meta, rows.length);
   if (o.rowStart && meta?.index_columns[0] && typeof meta.index_columns[0] === 'object') {
@@ -162,7 +186,9 @@ export async function toParquet(df: DataFrame, path?: string, o: ToParquetOption
   const w = await requireOptional<typeof import('hyparquet-writer')>('hyparquet-writer', 'toParquet');
   const { columns, meta } = describe(df, o.index);
   const columnData = columns.map(([name, c]) => parquetColumn(name, c));
-  const codec = (o.compression === null || o.compression === 'uncompressed' ? 'UNCOMPRESSED' : (o.compression ?? 'snappy').toUpperCase()) as 'SNAPPY';
+  // pyarrow writes compression='lz4' as the LZ4_RAW codec.
+  const name = o.compression === null || o.compression === 'uncompressed' ? 'UNCOMPRESSED' : o.compression === 'lz4' ? 'LZ4_RAW' : (o.compression ?? 'snappy').toUpperCase();
+  const codec = name as 'SNAPPY';
   // Naive datetimes must not be flagged as UTC-adjusted, or readers make them tz-aware.
   const schema = w.schemaFromColumnData({ columnData });
   // (The legacy converted type TIMESTAMP_MILLIS implies UTC, so naive columns use the logical type only.)
@@ -174,6 +200,7 @@ export async function toParquet(df: DataFrame, path?: string, o: ToParquetOption
   });
   const buf = Buffer.from(w.parquetWriteBuffer({
     columnData: columnData.map(({ name, data }) => ({ name, data })), schema, codec, rowGroupSize: o.rowGroupSize,
+    compressors: (await parquetCodecs()).write,
     kvMetadata: [{ key: 'pandas', value: JSON.stringify({ ...meta, creator: { library: 'pandasx' }, pandas_version: '2.2.0' }) }],
   }));
   if (path) (await import('node:fs')).writeFileSync(path, buf);

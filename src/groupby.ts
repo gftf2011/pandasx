@@ -5,7 +5,7 @@ import { isNumericDType, NULLABLE_DTYPES, type AggName, type DType, type Label }
 import { compareValues, hashKey, isNA } from './core/values.ts';
 import { colKey, DataFrame } from './frame.ts';
 import { concat } from './reshape.ts';
-import { samplePositions, Series } from './series.ts';
+import { samplePositions, Series, type AggFunc } from './series.ts';
 import type { RankOptions } from './core/stats.ts';
 import { EWM, Expanding, Rolling, type EwmOptions, type RollingOptions } from './window.ts';
 import { Resampler, type ResampleOptions } from './resample.ts';
@@ -24,10 +24,9 @@ export interface GroupByOptions {
   asIndex?: boolean;
 }
 
-type AggFn = AggName | ((s: Series) => unknown);
 
 /** `{column: func | func[]}`, or named aggregation `{output: [column, func]}`. */
-export type AggSpec = AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[] | readonly [string, AggFn]>;
+export type AggSpec = AggFunc | readonly AggFunc[] | Record<string, AggFunc | readonly AggFunc[] | readonly [string, AggFunc]>;
 
 interface Groups {
   keys: Label[][];
@@ -218,7 +217,7 @@ export abstract class BaseGroupBy {
   }
 
   /** @internal Aggregates one column per group. */
-  _aggColumn(col: Column, agg: AggFn, name: string): Column {
+  _aggColumn(col: Column, agg: AggFunc, name: string): Column {
     const rows = this._groups.rows;
     if (typeof agg === 'function') {
       return Column.from(rows.map((r) => agg(Series._from(col.take(r), this._frame.index.take(r), name))));
@@ -296,9 +295,9 @@ export class DataFrameGroupBy extends BaseGroupBy {
    */
   agg(spec: AggSpec): DataFrame {
     if (typeof spec === 'string') return this.reduce(spec);
-    const label = (f: AggFn, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
+    const label = (f: AggFunc, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
     const cols = new Map<string, Column>();
-    const add = (out: string, col: string, f: AggFn) => cols.set(out, this._aggColumn(this._frame._column(col), f, col));
+    const add = (out: string, col: string, f: AggFunc) => cols.set(out, this._aggColumn(this._frame._column(col), f, col));
 
     // Lists of functions give MultiIndex columns (column, func), like pandas.
     let multi = false;
@@ -308,19 +307,19 @@ export class DataFrameGroupBy extends BaseGroupBy {
       multi = true;
       for (const c of this.valueColumns()) {
         const dtype = this._frame._column(c).dtype;
-        (spec as readonly AggFn[]).forEach((f, i) => {
+        (spec as readonly AggFunc[]).forEach((f, i) => {
           if (typeof f === 'string' && NUMERIC_AGGS.has(f) && !isNumericDType(dtype)) return;
           add(colKey([c, label(f, i)]), c, f);
         });
       }
     } else {
-      const entries = Object.entries(spec as Record<string, AggFn | readonly AggFn[] | readonly [string, AggFn]>);
+      const entries = Object.entries(spec as Record<string, AggFunc | readonly AggFunc[] | readonly [string, AggFunc]>);
       const isNamed = (key: string, v: unknown) => Array.isArray(v) && v.length === 2 && typeof v[0] === 'string' && this._frame.has(v[0]) && !this._frame.has(key);
       multi = entries.some(([k, v]) => Array.isArray(v) && !isNamed(k, v));
       for (const [key, v] of entries) {
-        if (isNamed(key, v)) add(key, (v as readonly [string, AggFn])[0], (v as readonly [string, AggFn])[1]);
-        else if (Array.isArray(v)) (v as readonly AggFn[]).forEach((f, i) => add(colKey([key, label(f, i)]), key, f));
-        else add(multi ? colKey([key, label(v as AggFn, 0)]) : key, key, v as AggFn);
+        if (isNamed(key, v)) add(key, (v as readonly [string, AggFunc])[0], (v as readonly [string, AggFunc])[1]);
+        else if (Array.isArray(v)) (v as readonly AggFunc[]).forEach((f, i) => add(colKey([key, label(f, i)]), key, f));
+        else add(multi ? colKey([key, label(v as AggFunc, 0)]) : key, key, v as AggFunc);
       }
     }
     return this._wrap(cols, multi ? [null, null] : null);
@@ -482,7 +481,7 @@ export class SeriesGroupBy extends BaseGroupBy {
     return this.series(Column.from(this._groups.rows.map((r) => r.length), 'int64')).rename('size');
   }
 
-  private reduce(agg: AggFn): Series {
+  private reduce(agg: AggFunc): Series {
     return this.series(this._aggColumn(this.col(), agg, this.column));
   }
 
@@ -500,17 +499,17 @@ export class SeriesGroupBy extends BaseGroupBy {
   nunique(): Series { return this.reduce('nunique'); }
 
   /** One func → Series; a list of funcs → DataFrame with one column per func. */
-  agg(func: AggFn | readonly AggFn[] | Record<string, AggFn>): Series | DataFrame {
+  agg(func: AggFunc | readonly AggFunc[] | Record<string, AggFunc>): Series | DataFrame {
     if (typeof func === 'string' || typeof func === 'function') return this.reduce(func);
-    const entries: [string, AggFn][] = Array.isArray(func)
-      ? (func as readonly AggFn[]).map((f, i) => [typeof f === 'function' ? f.name || `func${i}` : f, f])
-      : Object.entries(func as Record<string, AggFn>);
+    const entries: [string, AggFunc][] = Array.isArray(func)
+      ? (func as readonly AggFunc[]).map((f, i) => [typeof f === 'function' ? f.name || `func${i}` : f, f])
+      : Object.entries(func as Record<string, AggFunc>);
     const cols = new Map<string, Column>();
     for (const [name, f] of entries) cols.set(name, this._aggColumn(this.col(), f, this.column));
     return this._wrap(cols);
   }
 
-  aggregate(func: AggFn | readonly AggFn[] | Record<string, AggFn>): Series | DataFrame {
+  aggregate(func: AggFunc | readonly AggFunc[] | Record<string, AggFunc>): Series | DataFrame {
     return this.agg(func);
   }
 
@@ -684,6 +683,7 @@ export class GroupedOperation {
   private readonly gb: BaseGroupBy;
   private readonly make: (t: Series | DataFrame) => Windowish;
 
+  /** @internal */
   constructor(gb: BaseGroupBy, make: (t: Series | DataFrame) => Windowish) {
     this.gb = gb;
     this.make = make;

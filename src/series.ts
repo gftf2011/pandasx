@@ -46,6 +46,9 @@ export type Operand = Series | readonly unknown[] | Float64Array | number | bigi
 
 export type RowSelector = Label | readonly Label[] | Mask | Slice;
 
+/** An aggregation: a name such as 'sum' / 'mean', or a function reducing a Series. */
+export type AggFunc = AggName | ((s: Series) => unknown);
+
 export function isPlainObject(v: unknown): v is Record<string, unknown> {
   if (typeof v !== 'object' || v === null) return false;
   const proto = Object.getPrototypeOf(v);

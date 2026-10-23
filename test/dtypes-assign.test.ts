@@ -47,6 +47,14 @@ describe('assignment', () => {
     assert.deepEqual(df.get('b').toArray(), [true, null]);
   });
 
+  it('keeps int64 / bool when an enlarged row is fully assigned', () => {
+    const df = new DataFrame({ n: [1, 2], ok: [true, false] }, { index: ['a', 'b'] });
+    df.setLoc('c', ['n', 'ok'], [3, true]);
+    assert.deepEqual(df.dtypes.toArray(), ['int64', 'bool']);
+    df.setLoc('d', 'n', 4);
+    assert.deepEqual(df.dtypes.toArray(), ['int64', 'object']);
+  });
+
   it('setIloc with 2-D values, setAt, setIat, columns setter', () => {
     const df = new DataFrame({ a: [1, 2], b: [3, 4] });
     df.setIloc(null, null, [[9, 8], [7, 6]]);

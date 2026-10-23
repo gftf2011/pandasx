@@ -1,4 +1,4 @@
-/** HTML tables: readHtml (all <table>s in a document) and toHtml (pandas-compatible markup). */
+/** HTML tables: readHtml (every `<table>` in a document) and toHtml (pandas-compatible markup). */
 import { Column } from '../core/column.ts';
 import { formatColumn, formatScalar } from '../core/format.ts';
 import type { Label } from '../core/types.ts';
@@ -10,7 +10,7 @@ import { readText, readTextSync, writeOutput, type Source } from './source.ts';
 export interface ReadHtmlOptions {
   /** Keep only tables whose text matches (string or RegExp, default all). */
   match?: string | RegExp;
-  /** Row(s) to use as the header (default: <thead> rows, else leading rows of <th>). */
+  /** Row(s) to use as the header (default: `<thead>` rows, else leading rows of `<th>`). */
   header?: number | readonly number[] | null;
   indexCol?: number | string | readonly (number | string)[];
   skiprows?: number | readonly number[];
@@ -166,7 +166,7 @@ function dedupeNames(names: string[]): string[] {
   });
 }
 
-/** Parses every <table> of an HTML string or file into DataFrames, like `pd.read_html`. */
+/** Parses every `<table>` of an HTML string or file into DataFrames, like `pd.read_html`. */
 export function readHtml(source: Source, options: ReadHtmlOptions = {}): DataFrame[] {
   return parseTables(readTextSync(source, { encoding: options.encoding, literal: (s) => s.includes('<') }), options);
 }

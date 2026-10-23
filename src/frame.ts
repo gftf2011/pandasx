@@ -33,7 +33,7 @@ import { isNA } from './core/values.ts';
 import { toHdf, type ToHdfOptions } from './io/hdf.ts';
 import {
   dropMatchedLevels, duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, resolveRows, labelPositions, positionalPositions, samplePositions,
-  Series, toIndex, type Mask, type Operand, type RowSelector,
+  Series, toIndex, type AggFunc, type Mask, type Operand, type RowSelector,
 } from './series.ts';
 
 export interface FrameOptions {
@@ -60,7 +60,6 @@ export interface AxisAggOptions extends AggOptions {
   numericOnly?: boolean;
 }
 
-type AggFn = AggName | ((s: Series) => unknown);
 
 const isAxis1 = (axis: unknown) => axis === 1 || axis === 'columns';
 
@@ -421,15 +420,29 @@ export class DataFrame {
   setLoc(rows: RowSelector | null | ((df: DataFrame) => Mask), cols: ColSelector | null, value: unknown): this {
     const r = typeof rows === 'function' ? rows(this) : rows;
     const rowScalar = r !== null && isScalarKey(r, this.index);
+    // Enlarging adds a missing cell to every column; remember int64 / bool columns so
+    // they can return to their dtype once the new cell is filled (as pandas 2+ does).
+    const before = new Map<string, DType>();
     if (rowScalar && !this.index.has(r as Label)) {
       const n = this.length;
       const grow = Int32Array.from({ length: n + 1 }, (_, i) => (i < n ? i : -1));
-      for (const [k, c] of this._cols) this._cols.set(k, c.take(grow));
+      for (const [k, c] of this._cols) {
+        if (c.dtype === 'int64' || c.dtype === 'bool') before.set(k, c.dtype);
+        this._cols.set(k, c.take(grow));
+      }
       this.index = new Index([...this.index.labels, r as Label], { name: this.index.name, names: this.index.names });
     }
     const pos = r === null ? Array.from({ length: this.length }, (_, i) => i) : labelPositions(r as RowSelector, this.index);
     const names = this.columnNames(cols, false, true);
-    return this.assignBlock(pos, names, value, rowScalar, typeof cols === 'string');
+    this.assignBlock(pos, names, value, rowScalar, typeof cols === 'string');
+    for (const [k, dtype] of before) {
+      const c = this._cols.get(k)!;
+      if (c.hasNA()) continue;
+      const vals = c.toArray();
+      const fits = dtype === 'int64' ? vals.every((v) => typeof v === 'number' && Number.isInteger(v)) : vals.every((v) => typeof v === 'boolean');
+      if (fits) this._cols.set(k, Column.from(vals, dtype));
+    }
+    return this;
   }
 
   /** In-place assignment by positions, like `df.iloc[rows, cols] = value`. */
@@ -719,18 +732,18 @@ export class DataFrame {
    * Aggregates columns. `func` may be a name/function (→ Series), a list
    * (→ DataFrame with one row per aggregation) or `{column: func | func[]}`.
    */
-  agg(func: AggFn): Series;
-  agg(func: readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): DataFrame;
-  agg(func: AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): Series | DataFrame {
-    const label = (f: AggFn, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
-    const apply = (name: string, f: AggFn) => (typeof f === 'function' ? f(this.get(name)) : aggregate(this._column(name), f));
+  agg(func: AggFunc): Series;
+  agg(func: readonly AggFunc[] | Record<string, AggFunc | readonly AggFunc[]>): DataFrame;
+  agg(func: AggFunc | readonly AggFunc[] | Record<string, AggFunc | readonly AggFunc[]>): Series | DataFrame {
+    const label = (f: AggFunc, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
+    const apply = (name: string, f: AggFunc) => (typeof f === 'function' ? f(this.get(name)) : aggregate(this._column(name), f));
     if (typeof func === 'string' || typeof func === 'function') {
       if (typeof func === 'string') return this.reduce(func);
       return new Series(this.columns.map((c) => func(this.get(c))), { index: this.columns });
     }
-    const spec: [string, readonly AggFn[]][] = Array.isArray(func)
-      ? this.columns.filter((c) => !func.some((f: AggFn) => typeof f === 'string' && NUMERIC_AGGS.has(f)) || isNumericDType(this._cols.get(c)!.dtype)).map((c) => [c, func as readonly AggFn[]])
-      : Object.entries(func as Record<string, AggFn | readonly AggFn[]>).map(([c, f]) => [c, Array.isArray(f) ? f : [f as AggFn]]);
+    const spec: [string, readonly AggFunc[]][] = Array.isArray(func)
+      ? this.columns.filter((c) => !func.some((f: AggFunc) => typeof f === 'string' && NUMERIC_AGGS.has(f)) || isNumericDType(this._cols.get(c)!.dtype)).map((c) => [c, func as readonly AggFunc[]])
+      : Object.entries(func as Record<string, AggFunc | readonly AggFunc[]>).map(([c, f]) => [c, Array.isArray(f) ? f : [f as AggFunc]]);
     const rowLabels: string[] = [];
     for (const [, fs] of spec) fs.forEach((f, i) => { const l = label(f, i); if (!rowLabels.includes(l)) rowLabels.push(l); });
     const cols = new Map<string, Column>();
@@ -1344,7 +1357,7 @@ export class DataFrame {
     lines.push('dtypes: ' + [...counts].map(([d, n]) => `${d}(${n})`).join(', '));
     const bytes = (this.memoryUsage().sum() as number);
     const hasObjects = [...this._cols.values()].some((c) => c.dtype === 'string' || c.dtype === 'object');
-    lines.push(`memory usage: ${humanBytes(bytes)}${hasObjects ? '+' : ''}`);
+    lines.push(`memory usage: ${humanBytes(bytes, hasObjects ? '+' : '')}`);
     return lines.join('\n');
   }
 
@@ -1412,12 +1425,13 @@ export class DataFrame {
 
 // ----------------------------------------------------------------- helpers
 
-function humanBytes(n: number): string {
+/** Like pandas: '180.0+ bytes', '1.2 KB' (the '+' marks a lower bound when objects are not measured). */
+function humanBytes(n: number, plus = ''): string {
   for (const unit of ['bytes', 'KB', 'MB', 'GB']) {
-    if (n < 1024 || unit === 'GB') return unit === 'bytes' ? `${n}.0 bytes` : `${n.toFixed(1)} ${unit}`;
+    if (n < 1024 || unit === 'GB') return `${n.toFixed(1)}${plus} ${unit}`;
     n /= 1024;
   }
-  return `${n} TB`;
+  return `${n.toFixed(1)}${plus} TB`;
 }
 
 /** Bytes of one column (typed storage exactly; object references as 8 bytes, plus contents when deep). */

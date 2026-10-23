@@ -6,7 +6,8 @@ import { compareValues, hashKey } from './core/values.ts';
 import { colKey, colTuple, DataFrame } from './frame.ts';
 import { KeyError, Series } from './series.ts';
 
-type Level = number | string;
+/** An index level, by position or name. */
+export type Level = number | string;
 
 const tupleOf = (index: Index, i: number): Label[] => (index.isMulti ? [...(index.labels[i] as readonly Label[])] : [index.labels[i]]);
 const namesOf = (index: Index): (string | null)[] => (index.isMulti ? [...index.names!] : [index.name]);
@@ -118,9 +119,9 @@ export function unstack(target: Series | DataFrame, options: { level?: Level | r
   const outIndex = makeIndex(newRows, keepLevels.map((l) => names[l]), index.tz);
   const build = (col: Column, ck: number) => {
     const positions = Int32Array.from({ length: newRows.length }, (_, r) => where.get(`${r}:${ck}`) ?? -1);
-    let c = col.take(positions);
-    if (options.fillValue !== undefined && options.fillValue !== null) c = c.mapLike((v, r) => (positions[r] < 0 ? options.fillValue : v));
-    return c;
+    if (options.fillValue === undefined || options.fillValue === null) return col.take(positions);
+    // Fill before building so an int column stays int when the fill value fits.
+    return Column.fromLike(Array.from(positions, (p) => (p < 0 ? options.fillValue : col.get(p))), col);
   };
   const levelNames = levels.map((l) => names[l]);
   const cols: [Label[], Column][] = [];

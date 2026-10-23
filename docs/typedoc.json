@@ -1,0 +1,22 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["../src/index.ts"],
+  "tsconfig": "./tsconfig.typedoc.json",
+  "out": "./api",
+  "plugin": ["typedoc-plugin-markdown", "typedoc-vitepress-theme"],
+  "docsRoot": ".",
+  "readme": "none",
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "hideGenerator": true,
+  "sort": ["kind", "alphabetical"],
+  "outputFileStrategy": "members",
+  "entryFileName": "index",
+  "parametersFormat": "table",
+  "interfacePropertiesFormat": "table",
+  "classPropertiesFormat": "table",
+  "typeDeclarationFormat": "table",
+  "skipErrorChecking": true,
+  "gitRevision": "main"
+}

@@ -5,10 +5,11 @@ import { Index } from './core/indexes.ts';
 import { toOffset, type DateOffset } from './core/offsets.ts';
 import { interpolate, type InterpolateMethod } from './core/stats.ts';
 import { MS, parseDate, parseTimedelta } from './core/time.ts';
-import { isNumericDType, type AggName } from './core/types.ts';
+import { isNumericDType } from './core/types.ts';
 import { fromWall, toWall } from './core/tz.ts';
 import { colKey, DataFrame } from './frame.ts';
-import { numericView, Series } from './series.ts';
+import { numericView, Series, type AggFunc } from './series.ts';
+import type { WindowTarget } from './window.ts';
 
 export interface ResampleOptions {
   /** Which bin edge is closed. Default 'left', except 'right' for ME/QE/YE/W/BME. */
@@ -23,8 +24,6 @@ export interface ResampleOptions {
   offset?: string;
 }
 
-type Target = Series | DataFrame;
-type AggFn = AggName | ((s: Series) => unknown);
 
 interface Bins {
   /** Bin labels (wall-clock ms). */
@@ -33,7 +32,7 @@ interface Bins {
   rows: number[][];
 }
 
-export class Resampler<T extends Target = Target> {
+export class Resampler<T extends WindowTarget = WindowTarget> {
   private readonly target: T;
   private readonly offset: DateOffset;
   private readonly options: ResampleOptions;
@@ -139,7 +138,7 @@ export class Resampler<T extends Target = Target> {
     return DataFrame._fromColumns(new Map(cols.map(([k, c]) => [k!, c])), index) as T;
   }
 
-  private reduce(agg: AggFn, numericOnly = typeof agg === 'string' && NUMERIC_AGGS.has(agg)): T {
+  private reduce(agg: AggFunc, numericOnly = typeof agg === 'string' && NUMERIC_AGGS.has(agg)): T {
     const { rows } = this.bins();
     const out: [string | null, Column][] = [];
     for (const [name, col] of this.valueColumns()) {
@@ -188,33 +187,33 @@ export class Resampler<T extends Target = Target> {
   }
 
   /** One func for every column, a list, or `{column: func | func[]}`. */
-  agg(spec: AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): Target {
+  agg(spec: AggFunc | readonly AggFunc[] | Record<string, AggFunc | readonly AggFunc[]>): WindowTarget {
     if (typeof spec === 'string' || typeof spec === 'function') return this.reduce(spec);
-    const label = (f: AggFn, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
+    const label = (f: AggFunc, i: number) => (typeof f === 'function' ? f.name || `func${i}` : f);
     const { rows } = this.bins();
     const cols = new Map<string, Column>();
-    const one = (col: Column, name: string | null, f: AggFn) =>
+    const one = (col: Column, name: string | null, f: AggFunc) =>
       Column.from(rows.map((r) => (typeof f === 'function' ? f(Series._from(col.take(r), this.target.index.take(r), name)) : aggregate(col, f, r))));
     if (Array.isArray(spec)) {
       for (const [name, col] of this.valueColumns()) {
-        (spec as readonly AggFn[]).forEach((f, i) => {
+        (spec as readonly AggFunc[]).forEach((f, i) => {
           if (typeof f === 'string' && NUMERIC_AGGS.has(f) && !isNumericDType(col.dtype)) return;
           cols.set(this.target instanceof Series ? label(f, i) : colKey([name!, label(f, i)]), one(col, name, f));
         });
       }
       return DataFrame._fromColumns(cols, this.index(), this.target instanceof Series ? null : [null, null]);
     }
-    const entries = Object.entries(spec as Record<string, AggFn | readonly AggFn[]>);
+    const entries = Object.entries(spec as Record<string, AggFunc | readonly AggFunc[]>);
     const multi = entries.some(([, f]) => Array.isArray(f));
     for (const [name, f] of entries) {
       const col = (this.target as DataFrame)._column(name);
-      if (Array.isArray(f)) (f as readonly AggFn[]).forEach((g, i) => cols.set(colKey([name, label(g, i)]), one(col, name, g)));
-      else cols.set(multi ? colKey([name, label(f as AggFn, 0)]) : name, one(col, name, f as AggFn));
+      if (Array.isArray(f)) (f as readonly AggFunc[]).forEach((g, i) => cols.set(colKey([name, label(g, i)]), one(col, name, g)));
+      else cols.set(multi ? colKey([name, label(f as AggFunc, 0)]) : name, one(col, name, f as AggFunc));
     }
     return DataFrame._fromColumns(cols, this.index(), multi ? [null, null] : null);
   }
 
-  aggregate(spec: AggFn | readonly AggFn[] | Record<string, AggFn | readonly AggFn[]>): Target {
+  aggregate(spec: AggFunc | readonly AggFunc[] | Record<string, AggFunc | readonly AggFunc[]>): WindowTarget {
     return this.agg(spec);
   }
 
@@ -230,7 +229,7 @@ export class Resampler<T extends Target = Target> {
   }
 
   /** Iterates `[binLabel, rows]`. */
-  *[Symbol.iterator](): IterableIterator<[Date, Target]> {
+  *[Symbol.iterator](): IterableIterator<[Date, WindowTarget]> {
     const { labels, rows } = this.bins();
     const idx = this.index(labels);
     for (let i = 0; i < labels.length; i++) yield [idx.labels[i] as Date, this.target.take(rows[i])];
@@ -325,7 +324,7 @@ export class Resampler<T extends Target = Target> {
 }
 
 /** Conforms a datetime-indexed object to a fixed frequency (pandas `asfreq`). */
-export function asfreq(target: Target, freq: string | DateOffset, options: { method?: 'pad' | 'ffill' | 'bfill' | 'backfill'; fillValue?: unknown } = {}): Target {
+export function asfreq(target: WindowTarget, freq: string | DateOffset, options: { method?: 'pad' | 'ffill' | 'bfill' | 'backfill'; fillValue?: unknown } = {}): WindowTarget {
   const r = new Resampler(target, freq, { origin: 'start' });
   if (options.method === 'pad' || options.method === 'ffill') return r.ffill();
   if (options.method === 'bfill' || options.method === 'backfill') return r.bfill();
