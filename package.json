@@ -1,6 +1,6 @@
 {
   "name": "pandasx",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "pandas-like DataFrame and Series for Node.js, written in TypeScript",
   "type": "module",
   "main": "./dist/index.js",
