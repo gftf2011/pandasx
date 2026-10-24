@@ -8,6 +8,8 @@
 
 📖 **Documentation: [gftf2011.github.io/pandasx](https://gftf2011.github.io/pandasx/)** — [getting started](https://gftf2011.github.io/pandasx/guide/getting-started), [coming from pandas](https://gftf2011.github.io/pandasx/guide/coming-from-pandas), guides with runnable examples and the full [API reference](https://gftf2011.github.io/pandasx/api/).
 
+🧪 **[Examples](https://github.com/gftf2011/pandasx/tree/main/examples)**: 20 runnable scripts covering every feature, from `Series` basics to an end-to-end sales report.
+
 - **Columnar, typed storage**: numbers and dates in `Float64Array`, booleans in `Uint8Array`, categories in `Int32Array`.
 - **Faithful to the pandas API**, with camelCase names (`sort_values` → `sortValues`, `read_csv` → `readCsv`).
 - **Checked against real pandas**: 214 parity cases (`npm run parity`) plus fixtures written by pandas 3.1.

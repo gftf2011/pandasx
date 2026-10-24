@@ -105,3 +105,4 @@ const first = df.get('city').iat(0) as string;   // unknown → string
 - [Selecting & assigning](./selection): `get`, `loc`, `iloc`, `query` and in-place assignment.
 - [Group by](./groupby), [Reshaping](./reshaping) and [Time series](./time-series) for analysis.
 - The [API reference](/api/) documents every method and option.
+- The [examples folder](https://github.com/gftf2011/pandasx/tree/main/examples) has 20 runnable scripts, one per feature area, on a shared dataset.

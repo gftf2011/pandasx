@@ -61,6 +61,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },
       { text: 'API', link: '/api/', activeMatch: '/api/' },
+      { text: 'Examples', link: 'https://github.com/gftf2011/pandasx/tree/main/examples' },
       { text: 'npm', link: 'https://www.npmjs.com/package/pandasx' },
     ],
     sidebar: {

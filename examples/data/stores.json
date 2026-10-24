@@ -1,0 +1,42 @@
+[
+  {
+    "store": "SP01",
+    "city": "São Paulo",
+    "state": "SP",
+    "opened": "2019-03-01",
+    "area_m2": 120,
+    "manager": "Ana Souza"
+  },
+  {
+    "store": "SP02",
+    "city": "Campinas",
+    "state": "SP",
+    "opened": "2021-08-15",
+    "area_m2": 85,
+    "manager": "bruno lima"
+  },
+  {
+    "store": "RJ01",
+    "city": "Rio de Janeiro",
+    "state": "RJ",
+    "opened": "2020-11-10",
+    "area_m2": 140,
+    "manager": "Carla Dias"
+  },
+  {
+    "store": "BH01",
+    "city": "Belo Horizonte",
+    "state": "MG",
+    "opened": "2022-05-02",
+    "area_m2": 70,
+    "manager": null
+  },
+  {
+    "store": "POA01",
+    "city": "Porto Alegre",
+    "state": "RS",
+    "opened": "2023-09-20",
+    "area_m2": 95,
+    "manager": "Diego Rocha"
+  }
+]
