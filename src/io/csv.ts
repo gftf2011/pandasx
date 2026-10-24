@@ -4,6 +4,7 @@ import * as zlib from 'node:zlib';
 import { inferCompression, readText, readTextSync, writeOutput, type Compression, type Source } from './source.ts';
 import { toDatetime } from '../datetimes.ts';
 import { pyFloat } from '../core/interval.ts';
+import { formatSpec, pyFormat } from '../core/pyformat.ts';
 import { strftime } from '../core/strftime.ts';
 import { toWall, tzOffset } from '../core/tz.ts';
 import { isNumericDType } from '../core/types.ts';
@@ -393,6 +394,8 @@ export interface ToCsvOptions {
   columns?: readonly string[];
   /** Fixed number of decimals for float columns. */
   floatDecimals?: number;
+  /** Float format like pandas' `float_format`: '%.2f', '{:,.2f}' or a function. */
+  floatFormat?: string | ((v: number) => string);
   /** Decimal mark for floats (default '.'). */
   decimal?: string;
   /** strftime format for datetime columns. */
@@ -439,9 +442,10 @@ export function toCsv(df: DataFrame, path?: string, options: ToCsvOptions = {}):
     }
     if (col.dtype === 'float64' || col.dtype === 'Float64') {
       const data = col.data as Float64Array;
+      const floatFmt = floatFormatter(options.floatFormat);
       return (i: number) => {
         if (data[i] !== data[i]) return naRep;
-        let t = options.floatDecimals !== undefined ? data[i].toFixed(options.floatDecimals) : pyFloat(data[i]);
+        let t = floatFmt ? floatFmt(data[i]) : options.floatDecimals !== undefined ? data[i].toFixed(options.floatDecimals) : pyFloat(data[i]);
         if (options.decimal && options.decimal !== '.') t = t.replace('.', options.decimal);
         return quote(t, true);
       };
@@ -512,4 +516,13 @@ export function readFwf(source: Source, options: ReadCsvOptions & { colspecs?: '
   const rows = lines.map((l) => specs.map(([a, b]) => l.slice(a, b).trim()));
   const { names, body } = splitHeader(rows, options);
   return rowsToFrame(options.nrows !== undefined ? body.slice(0, options.nrows) : body, names, options, 0);
+}
+
+/** Formatter for `floatFormat`: printf style ('%.2f', '%e'), Python style ('{:,.2f}') or a function. */
+function floatFormatter(fmt: string | ((v: number) => string) | undefined): ((v: number) => string) | null {
+  if (fmt === undefined) return null;
+  if (typeof fmt === 'function') return fmt;
+  const printf = /^%([-+ 0#]*\d*(?:\.\d+)?[eEfFgG%])$/.exec(fmt);
+  if (printf) return (v) => formatSpec(v, printf[1]);
+  return (v) => pyFormat(fmt, v);
 }

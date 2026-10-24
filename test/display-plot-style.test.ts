@@ -10,6 +10,12 @@ import { DataFrame, Series } from '../src/index.ts';
 const small = () => new DataFrame({ a: [1, 2], b: [1.5, NaN], c: ['x', 'y'] });
 
 describe('display options', () => {
+  it('formats a datetime index uniformly: midnight shows its time when others have one', () => {
+    const s = new Series([0, 1], { index: pd.dateRange('2024-02-28 23:00', { periods: 2, freq: 'h' }).toArray() as Date[] });
+    assert.equal(s.toString(), '2024-02-28 23:00:00  0\n2024-02-29 00:00:00  1\ndtype: int64');
+    const days = new Series([1, 2], { index: pd.dateRange('2024-03-01', { periods: 2 }).toArray() as Date[] });
+    assert.equal(days.toString(), '2024-03-01  1\n2024-03-02  2\ndtype: int64');
+  });
   it('hides middle columns to fit display.width, like pandas', () => {
     const w = new DataFrame(Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`col_${i}`, [i * 1000.5, (i + 15) * 1000.5]])));
     assert.equal(w.toString(), [
@@ -34,7 +40,13 @@ describe('display options', () => {
     assert.throws(() => pd.setOption('display.nope', 1), /No such option/);
   });
   it('toString options', () => {
-    assert.equal(small().toString({ index: false, naRep: '-' }), 'a    b  c\n1  1.5  x\n2    -  y');
+    assert.equal(small().toString({ index: false, naRep: '-' }), ' a   b c\n 1 1.5 x\n 2   - y'); // pandas index=False layout
+    // toString(options) is to_string(): never truncated unless asked; toString() is repr.
+    const wide = new DataFrame(Object.fromEntries('abcdefghijklmnopqrstuvwxyz'.split('').map((c) => [c, [1.5, 2.25]])));
+    assert.ok(wide.toString().includes('...'));
+    assert.ok(!wide.toString({ header: false }).includes('...'));
+    assert.ok(wide.toString({ lineWidth: 40 }).includes('...'));
+    assert.equal(pd.optionContext({ 'display.chop_threshold': 0.01 }, () => new Series([1e-4, 0.5, -1e-5]).toString()), '0  0.0\n1  0.5\n2  0.0\ndtype: float64');
   });
 });
 
@@ -50,6 +62,9 @@ describe('text exports', () => {
     assert.equal(pd.pyFormat('R$ {:,.2f}', -1234.5), 'R$ -1,234.50');
     assert.equal(pd.pyFormat('{:.1%}', 0.1234), '12.3%');
     assert.equal(pd.pyFormat('{:08.3f}', -3.14159), '-003.142');
+    // Exact ties round half to even, like Python (JavaScript's toFixed rounds them up).
+    const ties: [number, string, string][] = [[8.25, '.1f', '8.2'], [0.125, '.2f', '0.12'], [2.5, '.0f', '2'], [3.5, '.0f', '4'], [0.375, '.2f', '0.38'], [12.345, '.2f', '12.35'], [0.00125, '.1%', '0.1%']];
+    for (const [v, spec, want] of ties) assert.equal(pd.formatSpec(v, spec), want, `${v}:${spec}`);
     assert.equal(pd.pyFormat('{:^9}', 'mid'), '   mid   ');
     assert.equal(pd.pyFormat('{:.3g}', 0.000012345), '1.23e-05');
   });
@@ -60,6 +75,22 @@ describe('text exports', () => {
 });
 
 describe('Styler', () => {
+  it('toString / toLatex honour hidden index, header and rows', () => {
+    const d = new pd.DataFrame({ jan: [8.2, 6.1], feb: [7.9, 8.8] }, { index: ['SP01', 'RJ01'] });
+    assert.equal(d.style.format('{:.1f}').hide({ axis: 'index' }).toString(), 'jan feb\n8.2 7.9\n6.1 8.8\n');
+    assert.equal(d.style.hide({ axis: 'columns' }).toString(), 'SP01 8.200000 7.900000\nRJ01 6.100000 8.800000\n');
+    assert.match(d.style.hide({ subset: ['SP01'] }).toLatex(), /\n & jan & feb \\\\\nRJ01 & 6\.100000/);
+  });
+  it('table-wide rules (axis: null) for highlightQuantile and bar, like pandas axis=None', () => {
+    const d = new pd.DataFrame({ jan: [8.2, 6.1, 9.4], feb: [7.9, 8.8, 9.1], mar: [9.0, 5.5, 8.7] });
+    const q = d.style.highlightQuantile({ axis: null, qLeft: 0.8, color: 'g' });
+    const hits: number[][] = [];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) if (q.cellStyle(i, j).length) hits.push([i, j]);
+    assert.deepEqual(hits, [[2, 0], [2, 1]]);
+    const b = new pd.DataFrame({ a: [1, 2, 3], b: [10, 20, 30] }).style.bar({ axis: null });
+    assert.match(b.cellStyle(2, 0)[1], /6\.9%\)$/);       // 3 on a shared 1..30 scale
+    assert.match(b.cellStyle(2, 1)[1], /100\.0%\)$/);
+  });
   it('renders pandas markup', () => {
     const html = small().style.setUuid('44c45').highlightMax({ subset: ['a'] }).format({ b: '{:.2f}' }).setCaption('Cap').toHtml();
     assert.ok(html.startsWith('<style type="text/css">\n#T_44c45_row1_col0 {\n  background-color: yellow;\n}\n</style>\n<table id="T_44c45">\n  <caption>Cap</caption>'));

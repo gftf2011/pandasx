@@ -2,6 +2,38 @@ import type { Label } from './types.ts';
 import { Column } from './column.ts';
 import { Series } from '../series.ts';
 import { compareValues, hashKey } from './values.ts';
+import { fromWall } from './tz.ts';
+import { parseDate } from './time.ts';
+
+const PARTIAL_DATE = /^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?)?)?)?)?$/;
+
+/**
+ * Epoch-ms range [first, last] that a date label covers on a datetime index,
+ * like pandas' partial string indexing: '2024' is the whole year, '2024-03' the
+ * month, '2024-03-01' the day, '2024-03-01 06:00' that minute. Wall times are
+ * read in the index's time zone. Null when the label is not a date.
+ */
+export function dateLabelRange(label: Label, tz: string | null): [number, number] | null {
+  if (label instanceof Date) return Number.isNaN(label.getTime()) ? null : [label.getTime(), label.getTime()];
+  if (typeof label !== 'string') return null;
+  const m = PARTIAL_DATE.exec(label.trim());
+  if (!m) {
+    const t = parseDate(label);
+    return Number.isNaN(t) ? null : [t, t];
+  }
+  const parts = m.slice(1).map((v) => (v === undefined ? undefined : Number(v)));
+  const depth = parts.findIndex((v) => v === undefined);
+  const given = depth < 0 ? parts.length : depth;
+  const [y, mo = 1, d = 1, h = 0, mi = 0, sec = 0, ms = 0] = parts.slice(0, given) as number[];
+  const start = Date.UTC(y, mo - 1, d, h, mi, sec, ms);
+  const next = [
+    Date.UTC(y + 1, 0, 1), Date.UTC(y, mo, 1), Date.UTC(y, mo - 1, d + 1), Date.UTC(y, mo - 1, d, h + 1),
+    Date.UTC(y, mo - 1, d, h, mi + 1), Date.UTC(y, mo - 1, d, h, mi, sec + 1), start + 1,
+  ][given - 1];
+  if (Number.isNaN(start)) return null;
+  if (!tz) return [start, next - 1];
+  return [fromWall(start, tz, 'earliest', 'shift_forward'), fromWall(next, tz, 'earliest', 'shift_forward') - 1];
+}
 
 /**
  * Immutable sequence of row (or column) labels with hash lookup.
@@ -59,10 +91,29 @@ export class Index {
     return this.lookup;
   }
 
-  /** All positions holding `label` (empty when absent). */
+  /**
+   * All positions holding `label` (empty when absent). On a datetime index a
+   * date string (or Date) also matches every label in the period it names.
+   */
   getLoc(label: Label): readonly number[] {
-    return this.map().get(hashKey(label)) ?? [];
+    const exact = this.map().get(hashKey(label));
+    if (exact || !this.isDatetime) return exact ?? [];
+    const range = dateLabelRange(label, this.tz);
+    if (!range) return [];
+    const out: number[] = [];
+    this.labels.forEach((l, i) => {
+      const t = (l as Date | null)?.getTime();
+      if (t !== undefined && t >= range[0] && t <= range[1]) out.push(i);
+    });
+    return out;
   }
+
+  /** True for a flat index whose labels are all dates (or missing). */
+  get isDatetime(): boolean {
+    this.datetimeFlag ??= this.nlevels === 1 && this.length > 0 && this.labels.every((l) => l === null || l instanceof Date) && this.labels.some((l) => l !== null);
+    return this.datetimeFlag;
+  }
+  private datetimeFlag: boolean | undefined;
 
   has(label: Label): boolean {
     return this.map().has(hashKey(label));
@@ -279,6 +330,19 @@ export class Slice {
 
   /** Positions selected from an index by label bounds (inclusive stop). */
   labelPositions(index: Index): number[] {
+    // Sorted datetime index: date bounds need not exist and may be partial ('2024-03'), like pandas.
+    if (this.step > 0 && index.isDatetime && !index.labels.includes(null) && index.isMonotonicIncreasing) {
+      const lo = this.start === undefined || this.start === null ? null : dateLabelRange(this.start, index.tz);
+      const hi = this.stop === undefined || this.stop === null ? null : dateLabelRange(this.stop, index.tz);
+      if ((lo || this.start === undefined || this.start === null) && (hi || this.stop === undefined || this.stop === null)) {
+        const times = index.labels.map((l) => (l as Date).getTime());
+        let a = 0;
+        while (lo && a < times.length && times[a] < lo[0]) a++;
+        let b = times.length;
+        while (hi && b > a && times[b - 1] > hi[1]) b--;
+        return new Slice(a, b, this.step).positions(index.length);
+      }
+    }
     const bound = (l: Label | undefined, first: boolean): number | undefined => {
       if (l === undefined) return undefined;
       const locs = index.isMulti ? index.getLocPrefix(Array.isArray(l) ? (l as readonly Label[]) : [l]) : index.getLoc(l);

@@ -65,9 +65,9 @@ console.log(df.toString({ columns: ['b'], header: false }));
 ```
 
 ```text
-      a  b
-1.23456  x
-      -  y
+       a b
+ 1.23456 x
+       - y
 0  x
 1  y
 ```

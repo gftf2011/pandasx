@@ -134,5 +134,8 @@ describe('merging and combining', () => {
     const c = new DataFrame({ a: [1, 2, 3] }).compare(new DataFrame({ a: [1, 5, 3] }));
     assert.deepEqual(c.columnIndex.toArray(), [['a', 'self'], ['a', 'other']]);
     assert.deepEqual(c.values, [[2, 5]]);
+    // Columns keep their dtype (float stays float, strings stay strings), like pandas.
+    const d = new DataFrame({ s: [10, null, 4], t: ['x', 'y', 'z'] }).compare(new DataFrame({ s: [11, null, 4], t: ['x', 'y', 'q'] }));
+    assert.deepEqual(d.dtypes.toArray(), ['float64', 'float64', 'string', 'string']);
   });
 });

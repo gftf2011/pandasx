@@ -111,6 +111,10 @@ describe('SQL (node:sqlite)', () => {
     assert.deepEqual(chunks, [4, 2]);
     await expected().toSql('t', db, { ifExists: 'replace', index: false });
     assert.deepEqual((await pd.readSqlTable('t', db, { columns: ['i'] })).columns, ['i']);
+    // indexCol is fetched even when not in columns, like pandas.
+    const withIndex = await pd.readSqlTable('t', db, { columns: ['i'], indexCol: 's' });
+    assert.deepEqual(withIndex.columns, ['i']);
+    assert.equal(withIndex.index.name, 's');
   });
   it('works with a database path and a generic async client', async () => {
     const path = out('x.db');
@@ -156,6 +160,11 @@ describe('optional binary formats', () => {
     assert.deepEqual(await pd.hdfKeys(out('x.h5')), ['/frame', '/series']);
     sameData(await pd.readHdf(out('x.h5'), 'frame') as DataFrame, expected());
     assert.deepEqual((await pd.readHdf(out('x.h5'), 'series') as Series).toArray(), [1.5, 2]);
+    // Writing an existing key replaces it and keeps the others, like pandas' mode='a'.
+    await new Series([7, 8, 9], { name: 'v' }).toHdf(out('x.h5'), 'series');
+    assert.deepEqual(await pd.hdfKeys(out('x.h5')), ['/frame', '/series']);
+    assert.deepEqual((await pd.readHdf(out('x.h5'), 'series') as Series).toArray(), [7, 8, 9]);
+    sameData(await pd.readHdf(out('x.h5'), 'frame') as DataFrame, expected());
   });
   it('Excel: reads pandas workbooks, writes several sheets', async () => {
     sameData(await pd.readExcel(fx('pandas.xlsx'), { sheetName: 'data', indexCol: 0 }), expected());

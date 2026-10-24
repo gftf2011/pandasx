@@ -226,6 +226,19 @@ export async function toHdf(df: DataFrame | Series, path: string, key: string, o
   const lib = await h5();
   const { existsSync } = await import('node:fs');
   const frame = df instanceof Series ? df.toFrame(df.name ?? '0') : df;
+  if (o.mode !== 'w' && existsSync(path)) {
+    // Replacing a key, like pandas: h5wasm cannot unlink a node, so the file is
+    // rewritten with its other keys before the new one is added.
+    const keys = await hdfKeys(path);
+    const target = '/' + key.replace(/^\//, '');
+    if (keys.includes(target)) {
+      const others: [string, DataFrame | Series][] = [];
+      for (const k of keys) if (k !== target) others.push([k, await readHdf(path, k)]);
+      let mode: 'w' | 'a' = 'w';
+      for (const [k, v] of others) { await toHdf(v, path, k, { ...o, mode }); mode = 'a'; }
+      return toHdf(df, path, key, { ...o, mode });
+    }
+  }
   const f = new lib.File(path, o.mode === 'w' || !existsSync(path) ? 'w' : 'a');
   try {
     const name = key.replace(/^\//, '');
@@ -235,7 +248,6 @@ export async function toHdf(df: DataFrame | Series, path: string, key: string, o
       o.create_attribute(a, v, [], `${/^\(.*\.$/s.test(v) ? "A" : "S"}${Math.max(1, Buffer.byteLength(v))}`);
     };
     for (const [a, v] of [['CLASS', 'GROUP'], ['PYTABLES_FORMAT_VERSION', '2.1'], ['TITLE', ''], ['VERSION', '1.0']]) setText(f as never, a, v);
-    if (f.keys().includes(name)) (f as unknown as { delete(n: string): void }).delete(name);
     const g = f.create_group(name);
     const index = frame.index;
     if (index.isMulti) throw new Error('toHdf does not support MultiIndex rows yet; resetIndex() first');

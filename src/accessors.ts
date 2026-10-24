@@ -102,10 +102,10 @@ export class StringMethods {
   // measurement / predicates
   len(): Series { return this.map((v) => [...v].length, 'int64'); }
 
-  /** Substring or regex test; `na` fills missing values. */
+  /** Regex test like pandas (`regex: false` for a plain substring); `na` fills missing values. */
   contains(pat: string | RegExp, options: { case?: boolean; regex?: boolean; flags?: string; na?: unknown } = {}): Series {
     const caseSensitive = options.case ?? true;
-    const regex = options.regex ?? (pat instanceof RegExp);
+    const regex = options.regex ?? true;
     if (regex) {
       const re = toRegExp(pat, (caseSensitive ? '' : 'i') + (options.flags ?? ''));
       return this.map((v) => { re.lastIndex = 0; return re.test(v); }, 'bool', options.na);

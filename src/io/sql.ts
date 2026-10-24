@@ -117,7 +117,10 @@ export async function readSqlQuery(sql: string, conn: SqlConnection, o: ReadSqlO
 export async function readSqlTable(table: string, conn: SqlConnection, o: ReadSqlOptions = {}): Promise<DataFrame> {
   const db = await adapter(conn, o.dialect);
   try {
-    const cols = o.columns ? o.columns.map((c) => quoteIdent(c, db.dialect)).join(', ') : '*';
+    // The index column(s) are fetched even when not listed in `columns`, like pandas.
+    const index = o.indexCol === undefined ? [] : typeof o.indexCol === 'string' ? [o.indexCol] : [...o.indexCol];
+    const wanted = o.columns ? [...new Set([...index, ...o.columns])] : null;
+    const cols = wanted ? wanted.map((c) => quoteIdent(c, db.dialect)).join(', ') : '*';
     return rowsToFrame(await db.all(`SELECT ${cols} FROM ${quoteIdent(table, db.dialect)}`, []), o);
   } finally { db.close(); }
 }

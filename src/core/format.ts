@@ -2,7 +2,7 @@ import type { Column } from './column.ts';
 import type { Index } from './indexes.ts';
 import { Period, Timedelta } from './time.ts';
 import { Interval } from './interval.ts';
-import { formatOffset, tzOffset } from './tz.ts';
+import { formatOffset, toWall, tzOffset } from './tz.ts';
 import { NULLABLE_DTYPES, type Label } from './types.ts';
 
 /** Display options, like `pd.options.display` (mutable; see setOption / optionContext). */
@@ -100,7 +100,10 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
 
   const na = NULLABLE_DTYPES.has(col.dtype) ? '<NA>' : 'NaN';
   if (col.dtype === 'float64' || col.dtype === 'Float64') {
-    const data = col.data as Float64Array;
+    // display.chop_threshold applies before the number of decimals is chosen, like pandas.
+    const chop = DISPLAY.chopThreshold;
+    const raw = col.data as Float64Array;
+    const data = chop === null ? raw : raw.map((v) => (Math.abs(v) < chop ? 0 : v));
     let decimals = 1;
     let exp = false;
     for (const p of rows) {
@@ -112,12 +115,10 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
         if (Number(v.toFixed(d)) === Number(v.toFixed(DISPLAY.precision))) { decimals = Math.max(decimals, d); break; }
       }
     }
-    const chop = DISPLAY.chopThreshold;
     fmt = (p) => {
-      let v = data[p];
+      const v = data[p];
       if (Number.isNaN(v)) return na;
       if (!Number.isFinite(v)) return v > 0 ? 'inf' : '-inf';
-      if (chop !== null && Math.abs(v) < chop) v = 0;
       if (DISPLAY.floatFormat) return DISPLAY.floatFormat(v);
       return exp ? v.toExponential(DISPLAY.precision) : v.toFixed(decimals);
     };
@@ -143,31 +144,34 @@ export function formatColumn(col: Column, positions: readonly (number | null)[])
 export function formatIndex(index: Index, positions: readonly (number | null)[]): string[][] {
   const levels = index.nlevels;
   const out: string[][] = Array.from({ length: levels }, () => []);
+  const at = (p: number, l: number): Label => (levels > 1 ? (index.labels[p] as readonly Label[])[l] : index.labels[p]);
+  // Dates in one level share a format, like pandas: date-only when every label is midnight.
+  const shown = positions.filter((p): p is number => p !== null);
+  const dateFormat = Array.from({ length: levels }, (_, l) => {
+    const times = shown.map((p) => at(p, l)).filter((v): v is Date => v instanceof Date && !Number.isNaN(v.getTime())).map((d) => d.getTime());
+    return { dateOnly: times.every((t) => toWall(t, index.tz) % 86_400_000 === 0), withMs: times.some((t) => t % 1000 !== 0) };
+  });
   for (const p of positions) {
-    const label = p === null ? null : index.labels[p];
     for (let l = 0; l < levels; l++) {
-      if (p === null) out[l].push('...');
-      else if (levels > 1) out[l].push(formatLabel((label as readonly Label[])[l], index.tz));
-      else out[l].push(formatLabel(label, index.tz));
+      if (p === null) { out[l].push('...'); continue; }
+      const v = at(p, l);
+      if (v instanceof Date) out[l].push(Number.isNaN(v.getTime()) ? 'NaT' : formatDate(v.getTime(), dateFormat[l].dateOnly, dateFormat[l].withMs, index.tz));
+      else out[l].push(formatScalar(v));
     }
   }
   return out;
 }
 
-function formatLabel(l: Label, tz: string | null = null): string {
-  if (l instanceof Date) return Number.isNaN(l.getTime()) ? 'NaT' : formatDate(l.getTime(), l.getTime() % 86_400_000 === 0, l.getTime() % 1000 !== 0, tz);
-  return formatScalar(l);
-}
-
 /**
  * Renders a text table. `left` columns (the index) are left-aligned and all
  * others right-aligned, like pandas. Header rows that are entirely blank are skipped.
+ * `compact` is pandas' index=False layout (each column prefixed by one space).
  */
-export function renderTable(headers: readonly (readonly string[])[] | null, columns: string[][], leftCount: number): string {
+export function renderTable(headers: readonly (readonly string[])[] | null, columns: string[][], leftCount: number, compact = false): string {
   const rows = (headers ?? []).filter((h) => h.some((c) => c !== ''));
   const widths = columns.map((c, j) => Math.max(...rows.map((h) => h[j]?.length ?? 0), ...c.map((s) => s.length), 0));
   const pad = (s: string, j: number) => (j < leftCount ? s.padEnd(widths[j]) : s.padStart(widths[j]));
-  const line = (cells: readonly string[]) => cells.map(pad).join('  ').trimEnd();
+  const line = (cells: readonly string[]) => (compact ? cells.map((c, j) => ' ' + pad(c, j)).join('') : cells.map(pad).join('  ')).trimEnd();
   const lines = rows.map(line);
   const nrows = columns[0]?.length ?? 0;
   for (let i = 0; i < nrows; i++) lines.push(line(columns.map((c) => c[i])));

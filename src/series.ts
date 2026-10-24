@@ -1,4 +1,4 @@
-import { aggregate, quantile, type AggOptions } from './core/aggregate.ts';
+import { aggregate, quantile, type AggOptions, type QuantileInterpolation } from './core/aggregate.ts';
 import { Column } from './core/column.ts';
 import { DISPLAY, displayPositions, formatColumn, formatIndex, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
@@ -40,6 +40,12 @@ export interface SeriesOptions {
 
 /** Something usable as a boolean mask: a bool Series or an array of booleans. */
 export type Mask = Series | readonly boolean[] | Uint8Array;
+
+/** Options of the arithmetic methods (`add`, `sub`, ...), like pandas' `fill_value`. */
+export interface ArithOptions {
+  /** Replaces a missing value on one side (after alignment) before computing; missing on both sides stays NA. */
+  fillValue?: unknown;
+}
 
 /** Operand of arithmetic and comparison methods. */
 export type Operand = Series | readonly unknown[] | Float64Array | number | bigint | string | boolean | Date | Timedelta | Period | DateOffset | null;
@@ -391,11 +397,18 @@ export class Series {
   count(): number { return this.agg1('count') as number; }
   nunique(): number { return this.agg1('nunique') as number; }
 
-  quantile(q: number): number;
-  quantile(q: readonly number[]): Series;
-  quantile(q: number | readonly number[]): number | Series {
-    if (typeof q === 'number') return quantile(this._col, q);
-    return new Series(q.map((x) => quantile(this._col, x)), { index: [...q], name: this.name });
+  /** Quantile(s) of the non-missing values; `interpolation` as in pandas (default 'linear'). */
+  quantile(q: number, options?: { interpolation?: QuantileInterpolation }): number;
+  quantile(q: readonly number[], options?: { interpolation?: QuantileInterpolation }): Series;
+  quantile(q: number | readonly number[], options: { interpolation?: QuantileInterpolation } = {}): number | Series {
+    const how = options.interpolation ?? 'linear';
+    if (typeof q === 'number') return quantile(this._col, q, null, how);
+    return new Series(q.map((x) => quantile(this._col, x, null, how)), { index: [...q], name: this.name });
+  }
+
+  /** Calls `fn(this, ...args)`, for chaining custom steps: `s.pipe(clean).pipe(scale, 10)`. */
+  pipe<T, A extends unknown[]>(fn: (s: Series, ...args: A) => T, ...args: A): T {
+    return fn(this, ...args);
   }
 
   /** Applies one aggregation, several (returns a Series) or a reducer function. */
@@ -564,9 +577,11 @@ export class Series {
 
   abs(): Series { return this.numericMap(Math.abs, true); }
 
+  /** Rounds like NumPy / pandas: `rint(v * 10^d) / 10^d`, ties to even (2.5 → 2, 0.125 → 0.12). */
   round(decimals = 0): Series {
-    const f = 10 ** decimals;
-    return this.numericMap((v) => Math.round(v * f) / f, decimals >= 0);
+    const f = 10 ** Math.abs(decimals);
+    const fn = decimals >= 0 ? (v: number) => rintHalfEven(v * f) / f : (v: number) => rintHalfEven(v / f) * f;
+    return this.numericMap(fn, decimals >= 0);
   }
 
   clip(lower?: number | null, upper?: number | null): Series {
@@ -800,9 +815,17 @@ export class Series {
     return { left: this._col, right: null, scalar: other, index: this.index };
   }
 
-  private arith(op: string, other: Operand, reverse = false): Series {
+  private arith(op: string, other: Operand, reverse = false, options: ArithOptions = {}): Series {
     if (other instanceof DateOffset) return this.applyOffset(other, op, reverse);
-    const { left, right, scalar, index } = this._align(other);
+    let { left, right, scalar, index } = this._align(other);
+    const fill = options.fillValue;
+    if (fill !== undefined && !isNA(fill)) {
+      const n = left.length;
+      const leftNA = Array.from({ length: n }, (_, i) => isNA(left.get(i)));
+      const rightNA = Array.from({ length: n }, (_, i) => isNA(right ? right.get(i) : scalar));
+      if (leftNA.some((na, i) => na && !rightNA[i])) left = left.mapLike((v, i) => (leftNA[i] && !rightNA[i] ? fill : v));
+      if (right && rightNA.some((na, i) => na && !leftNA[i])) right = right.mapLike((v, i) => (rightNA[i] && !leftNA[i] ? fill : v));
+    }
     const fn = ARITH[op];
     const n = left.length;
     const rightDtype: DType = right ? right.dtype : scalarDType(scalar);
@@ -856,21 +879,21 @@ export class Series {
     return this.with(new Column('datetime', out, { tz }));
   }
 
-  add(other: Operand): Series { return this.arith('add', other); }
-  sub(other: Operand): Series { return this.arith('sub', other); }
-  mul(other: Operand): Series { return this.arith('mul', other); }
-  div(other: Operand): Series { return this.arith('div', other); }
-  truediv(other: Operand): Series { return this.arith('div', other); }
-  mod(other: Operand): Series { return this.arith('mod', other); }
-  pow(other: Operand): Series { return this.arith('pow', other); }
-  floordiv(other: Operand): Series { return this.arith('floordiv', other); }
-  radd(other: Operand): Series { return this.arith('add', other, true); }
-  rsub(other: Operand): Series { return this.arith('sub', other, true); }
-  rmul(other: Operand): Series { return this.arith('mul', other, true); }
-  rdiv(other: Operand): Series { return this.arith('div', other, true); }
-  rmod(other: Operand): Series { return this.arith('mod', other, true); }
-  rpow(other: Operand): Series { return this.arith('pow', other, true); }
-  rfloordiv(other: Operand): Series { return this.arith('floordiv', other, true); }
+  add(other: Operand, options: ArithOptions = {}): Series { return this.arith('add', other, false, options); }
+  sub(other: Operand, options: ArithOptions = {}): Series { return this.arith('sub', other, false, options); }
+  mul(other: Operand, options: ArithOptions = {}): Series { return this.arith('mul', other, false, options); }
+  div(other: Operand, options: ArithOptions = {}): Series { return this.arith('div', other, false, options); }
+  truediv(other: Operand, options: ArithOptions = {}): Series { return this.arith('div', other, false, options); }
+  mod(other: Operand, options: ArithOptions = {}): Series { return this.arith('mod', other, false, options); }
+  pow(other: Operand, options: ArithOptions = {}): Series { return this.arith('pow', other, false, options); }
+  floordiv(other: Operand, options: ArithOptions = {}): Series { return this.arith('floordiv', other, false, options); }
+  radd(other: Operand, options: ArithOptions = {}): Series { return this.arith('add', other, true, options); }
+  rsub(other: Operand, options: ArithOptions = {}): Series { return this.arith('sub', other, true, options); }
+  rmul(other: Operand, options: ArithOptions = {}): Series { return this.arith('mul', other, true, options); }
+  rdiv(other: Operand, options: ArithOptions = {}): Series { return this.arith('div', other, true, options); }
+  rmod(other: Operand, options: ArithOptions = {}): Series { return this.arith('mod', other, true, options); }
+  rpow(other: Operand, options: ArithOptions = {}): Series { return this.arith('pow', other, true, options); }
+  rfloordiv(other: Operand, options: ArithOptions = {}): Series { return this.arith('floordiv', other, true, options); }
   neg(): Series { return this.mul(-1); }
 
   private cmp(op: string, other: Operand): Series {
@@ -1005,6 +1028,9 @@ export class Series {
 
   // ------------------------------------------------------------------ reshape
 
+  resetIndex(options?: { drop?: false; name?: string }): DataFrame;
+  resetIndex(options: { drop: true }): Series;
+  resetIndex(options?: { drop?: boolean; name?: string }): DataFrame | Series;
   resetIndex(options: { drop?: boolean; name?: string } = {}): DataFrame | Series {
     if (options.drop) return this.with(this._col, Index.range(this.length));
     return this.toFrame(options.name ?? this.name ?? '0').resetIndex();
@@ -1012,6 +1038,7 @@ export class Series {
 
   /** Groups values by Series, arrays of keys, functions of the index label, and/or index levels. */
   groupby(by: GroupKey | readonly GroupKey[] | null, options: GroupByOptions = {}): SeriesGroupBy {
+    if (options.asIndex === false) throw new TypeError('asIndex: false is only valid when grouping a DataFrame');
     const base = DataFrame._fromColumns(new Map([['\u0000value', this._col]]), this.index);
     const r = resolveGroupKeys(base, by, options.level);
     return new SeriesGroupBy(r.frame, r.by, '\u0000value', options, r.names, this.name);
@@ -1355,4 +1382,14 @@ export function convertColumn(col: Column): Column {
     default:
       return col;
   }
+}
+
+/** Nearest integer, ties to even (C `rint`). */
+function rintHalfEven(y: number): number {
+  if (!Number.isFinite(y)) return y;
+  const f = Math.floor(y);
+  const diff = y - f;
+  if (diff > 0.5) return f + 1;
+  if (diff < 0.5) return f;
+  return f % 2 === 0 ? f : f + 1;
 }

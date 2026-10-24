@@ -1,4 +1,4 @@
-import { aggregate, NUMERIC_AGGS, quantile, type AggOptions } from './core/aggregate.ts';
+import { aggregate, NUMERIC_AGGS, quantile, type AggOptions, type QuantileInterpolation } from './core/aggregate.ts';
 import { Column } from './core/column.ts';
 import { DISPLAY, displayPositions, formatColumn, formatIndex, formatScalar, renderTable } from './core/format.ts';
 import { Index, Slice } from './core/indexes.ts';
@@ -33,7 +33,7 @@ import { isNA } from './core/values.ts';
 import { toHdf, type ToHdfOptions } from './io/hdf.ts';
 import {
   dropMatchedLevels, duplicatedFlags, isMask, isPlainObject, isScalarKey, KeyError, numericView, resolveRows, labelPositions, positionalPositions, samplePositions,
-  Series, toIndex, type AggFunc, type Mask, type Operand, type RowSelector,
+  Series, toIndex, type AggFunc, type ArithOptions, type Mask, type Operand, type RowSelector,
 } from './series.ts';
 
 export interface FrameOptions {
@@ -713,9 +713,15 @@ export class DataFrame {
   all(options?: AxisAggOptions): Series { return this.reduce('all', options); }
   nunique(options?: AxisAggOptions): Series { return this.reduce('nunique', options); }
 
-  quantile(q = 0.5): Series {
+  /** Quantile of each numeric column; `interpolation` as in pandas (default 'linear'). */
+  quantile(q = 0.5, options: { interpolation?: QuantileInterpolation } = {}): Series {
     const names = this.columns.filter((c) => isNumericDType(this._cols.get(c)!.dtype));
-    return new Series(names.map((n) => quantile(this._cols.get(n)!, q)), { index: names, name: String(q) });
+    return new Series(names.map((n) => quantile(this._cols.get(n)!, q, null, options.interpolation ?? 'linear')), { index: names, name: String(q) });
+  }
+
+  /** Calls `fn(this, ...args)`, for chaining custom steps: `df.pipe(clean).pipe(addTotals, 'revenue')`. */
+  pipe<T, A extends unknown[]>(fn: (df: DataFrame, ...args: A) => T, ...args: A): T {
+    return fn(this, ...args);
   }
 
   idxmax(): Series {
@@ -1003,7 +1009,9 @@ export class DataFrame {
    * Groups rows by column name(s), Series, arrays of keys, functions of the
    * index label, and/or index levels (`{ level }`).
    */
-  groupby(by: GroupKey | readonly GroupKey[] | null, options: GroupByOptions = {}): DataFrameGroupBy {
+  groupby(by: GroupKey | readonly GroupKey[] | null, options: GroupByOptions & { asIndex: false }): DataFrameGroupBy<DataFrame>;
+  groupby(by: GroupKey | readonly GroupKey[] | null, options?: GroupByOptions): DataFrameGroupBy;
+  groupby(by: GroupKey | readonly GroupKey[] | null, options: GroupByOptions = {}): DataFrameGroupBy<Series | DataFrame> {
     const r = resolveGroupKeys(this, by, options.level);
     return new DataFrameGroupBy(r.frame, r.by, options, null, r.names);
   }
@@ -1097,12 +1105,12 @@ export class DataFrame {
     return this.mapColumns((s) => op(s, other));
   }
 
-  add(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.add(b)); }
-  sub(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.sub(b)); }
-  mul(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.mul(b)); }
-  div(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.div(b)); }
-  mod(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.mod(b)); }
-  pow(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.pow(b)); }
+  add(other: Operand | DataFrame, options: ArithOptions = {}): DataFrame { return this.binary(other, (a, b) => a.add(b, options)); }
+  sub(other: Operand | DataFrame, options: ArithOptions = {}): DataFrame { return this.binary(other, (a, b) => a.sub(b, options)); }
+  mul(other: Operand | DataFrame, options: ArithOptions = {}): DataFrame { return this.binary(other, (a, b) => a.mul(b, options)); }
+  div(other: Operand | DataFrame, options: ArithOptions = {}): DataFrame { return this.binary(other, (a, b) => a.div(b, options)); }
+  mod(other: Operand | DataFrame, options: ArithOptions = {}): DataFrame { return this.binary(other, (a, b) => a.mod(b, options)); }
+  pow(other: Operand | DataFrame, options: ArithOptions = {}): DataFrame { return this.binary(other, (a, b) => a.pow(b, options)); }
   eq(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.eq(b)); }
   ne(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.ne(b)); }
   lt(other: Operand | DataFrame): DataFrame { return this.binary(other, (a, b) => a.lt(b)); }
@@ -1365,15 +1373,19 @@ export class DataFrame {
    * Text rendering (what `console.log(df)` shows). Options override the global
    * display options for this call.
    */
-  toString(options: { maxRows?: number; maxCols?: number; index?: boolean; header?: boolean; naRep?: string; lineWidth?: number; showDimensions?: boolean | 'truncate'; columns?: readonly string[] } = {}): string {
+  toString(opts?: { maxRows?: number; maxCols?: number; index?: boolean; header?: boolean; naRep?: string; lineWidth?: number; showDimensions?: boolean | 'truncate'; columns?: readonly string[] }): string {
+    // No options: repr, truncated by the display options (console.log, String(df)).
+    // With options: like pandas' to_string(), complete unless maxRows / maxCols / lineWidth say otherwise.
+    const repr = opts === undefined;
+    const options = opts ?? {};
     const frame = options.columns ? this.get(options.columns) : this;
     const [nrows, ncols] = frame.shape;
     if (ncols === 0 || nrows === 0) {
       return `Empty DataFrame\nColumns: [${frame.columns.join(', ')}]\nIndex: [${frame.index.labels.map(String).join(', ')}]`;
     }
-    const maxRows = options.maxRows ?? DISPLAY.maxRows;
-    const maxCols = options.maxCols ?? DISPLAY.maxColumns;
-    const width = options.lineWidth ?? DISPLAY.width;
+    const maxRows = options.maxRows ?? (repr ? DISPLAY.maxRows : 0);
+    const maxCols = options.maxCols ?? (repr ? DISPLAY.maxColumns : 0);
+    const width = options.lineWidth ?? (repr ? DISPLAY.width : 0);
     const rowPos = displayPositions(nrows, maxRows || Infinity, Math.min(DISPLAY.minRows, maxRows || Infinity));
     const names = frame.columns;
     const levels = frame.nColumnLevels;
@@ -1411,9 +1423,9 @@ export class DataFrame {
       indexNames.push('');
       body.push(cellCols[j]);
     }
-    let out = renderTable(options.header === false ? [] : [...headers, indexNames], body, idx.length);
+    let out = renderTable(options.header === false ? [] : [...headers, indexNames], body, idx.length, !showIndex);
     const truncated = nrows > rowPos.filter((p) => p !== null).length || colPos.includes(null);
-    const dims = options.showDimensions ?? DISPLAY.showDimensions;
+    const dims = options.showDimensions ?? (repr ? DISPLAY.showDimensions : false);
     if (dims === true || (dims === 'truncate' && truncated)) out += `\n\n[${nrows} rows x ${ncols} columns]`;
     return out;
   }

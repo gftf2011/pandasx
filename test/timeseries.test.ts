@@ -18,7 +18,30 @@ const s = new Series([1, 2, 3, 4, 5, NaN, 7, 8, 2, 1.5]);
 const idx = pd.toDatetime(['2024-01-01', '2024-01-02', '2024-01-02 12:00', '2024-01-05', '2024-01-06', '2024-01-09', '2024-01-31', '2024-02-01', '2024-02-29', '2024-03-15']).toArray() as Date[];
 const t = new Series([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], { index: idx, dtype: 'float64' });
 
+describe('datetime index lookups', () => {
+  const s = new Series([0, 1, 2, 3, 4, 5], { index: pd.dateRange('2024-02-28 22:00', { periods: 6, freq: 'h' }).toArray() as Date[] });
+  it('slices with date strings that need not exist, like pandas', () => {
+    assert.deepEqual(s.loc(pd.slice('2024-02-29 00:30', '2024-02-29 02:00')).toArray(), [3, 4]);
+    assert.deepEqual(s.loc(pd.slice(null, '2024-02-28')).toArray(), [0, 1]);
+    assert.deepEqual(s.loc(pd.slice('2024-02-29 01', null)).toArray(), [3, 4, 5]);
+    const df = new DataFrame({ v: [0, 1, 2, 3, 4, 5] }, { index: s.index });
+    assert.deepEqual(df.loc(pd.slice('2024-02-29 01:00', '2024-02-29 02:00'), 'v').toArray(), [3, 4]);
+  });
+  it('partial strings select a whole period; exact strings a single label', () => {
+    assert.deepEqual((s.loc('2024-02-29') as Series).toArray(), [2, 3, 4, 5]);
+    assert.deepEqual((s.loc('2024-02') as Series).toArray(), [0, 1, 2, 3, 4, 5]);
+    assert.equal(s.loc('2024-02-29 01:00'), 3);
+    assert.deepEqual((s.tzLocalize('America/Sao_Paulo').loc('2024-02-29') as Series).toArray(), [2, 3, 4, 5]);
+  });
+});
+
 describe('rolling / expanding / ewm', () => {
+  it('apply passes a Series by default, raw arrays with raw: true', () => {
+    const s = new Series([1, 5, 2, 8, 3]);
+    assert.deepEqual(s.rolling(3).apply((w) => (w.max() as number) - (w.min() as number)).toArray(), [NaN, NaN, 4, 6, 6]);
+    assert.deepEqual(s.rolling(2).apply((w) => w.index.labels[1] as number).toArray(), [NaN, 1, 2, 3, 4]);
+    assert.deepEqual(s.rolling(3).apply((a) => a.reduce((x, y) => x + y, 0), { raw: true }).toArray(), [NaN, NaN, 8, 15, 13]);
+  });
   it('fixed windows', () => {
     near(s.rolling(4).std().toArray(), [null, null, null, 1.2909944487358056, 1.2909944487358056, null, null, null, null, 3.3509948771471834]);
     near(s.rolling(3, { minPeriods: 1 }).mean().toArray(), [1, 1.5, 2, 3, 4, 4.5, 6, 7.5, 17 / 3, 23 / 6]);

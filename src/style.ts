@@ -234,11 +234,20 @@ export class Styler {
 
   highlightQuantile(options: { subset?: Subset; color?: string; axis?: Axis; qLeft?: number; qRight?: number; props?: string } = {}): this {
     const css = options.props ?? `background-color: ${options.color ?? 'yellow'};`;
-    return this.apply((s: Series) => {
-      const col = Column.from(s.toArray().map((v) => (typeof v === 'number' ? v : NaN)), 'float64');
+    const mark = (vals: unknown[]): (string | null)[] => {
+      const col = Column.from(vals.map((v) => (typeof v === 'number' ? v : NaN)), 'float64');
       const lo = quantile(col, options.qLeft ?? 0), hi = quantile(col, options.qRight ?? 1);
-      return s.toArray().map((v) => (typeof v === 'number' && v >= lo && v <= hi ? css : null));
-    }, { axis: options.axis, subset: options.subset });
+      return vals.map((v) => (typeof v === 'number' && v >= lo && v <= hi ? css : null));
+    };
+    if (options.axis === null) {
+      // Quantiles over the whole table (or subset), like pandas' axis=None.
+      return this.apply((d: DataFrame) => {
+        const cols = d.columns.map((c) => d.get(c).toArray());
+        const marks = mark(cols.flat());
+        return Array.from({ length: d.length }, (_, i) => cols.map((_, j) => marks[j * d.length + i]));
+      }, { axis: null, subset: options.subset });
+    }
+    return this.apply((s: Series) => mark(s.toArray()), { axis: options.axis, subset: options.subset });
   }
 
   /** Background colour by value (numeric columns), with readable text colour. */
@@ -284,8 +293,8 @@ export class Styler {
     const width = (options.width ?? 100) / 100;
     const subset = options.subset ?? this.data.columns.filter((c) => isNumericDType(this.data._column(c).dtype));
     const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
-    return this.apply((s: Series) => {
-      const nums = s.toArray().map((v) => (typeof v === 'number' ? v : NaN));
+    const bars = (vals: unknown[]): (string | null)[] => {
+      const nums = vals.map((v) => (typeof v === 'number' ? v : NaN));
       const finite = nums.filter((v) => Number.isFinite(v));
       const lo = options.vmin ?? Math.min(...finite), hi = options.vmax ?? Math.max(...finite);
       const align = options.align ?? 'left';
@@ -300,7 +309,16 @@ export class Styler {
         const c = v < 0 ? neg : pos;
         return `width: 10em; background: linear-gradient(90deg, transparent ${pct(start)}, ${c} ${pct(start)}, ${c} ${pct(end)}, transparent ${pct(end)});`;
       });
-    }, { axis: options.axis, subset });
+    };
+    if (options.axis === null) {
+      // One scale for the whole table (or subset), like pandas' axis=None.
+      return this.apply((d: DataFrame) => {
+        const cols = d.columns.map((c) => d.get(c).toArray());
+        const marks = bars(cols.flat());
+        return Array.from({ length: d.length }, (_, i) => cols.map((_, j) => marks[j * d.length + i]));
+      }, { axis: null, subset });
+    }
+    return this.apply((s: Series) => bars(s.toArray()), { axis: options.axis, subset });
   }
 
   // -------------------------------------------------------------- layout
@@ -414,8 +432,10 @@ export class Styler {
     const sep = options.delimiter ?? ' ';
     const cols = this.data.columns.map((_, j) => j).filter((j) => !this.hiddenCols.has(j));
     const rows = Array.from({ length: this.data.length }, (_, i) => i).filter((i) => !this.hiddenRows.has(i));
-    const lines = [['', ...cols.map((j) => this.data.columns[j])].join(sep)];
-    for (const i of rows) lines.push([formatScalar(this.data.index.labels[i]), ...cols.map((j) => this.display(i, j))].join(sep));
+    // hide({ axis: 'index' }) drops the label column, hide({ axis: 'columns' }) the header, like pandas.
+    const label = (i: number) => (this.hiddenIndex ? [] : [this.indexFormatter ? this.indexFormatter(this.data.index.labels[i]) : formatScalar(this.data.index.labels[i])]);
+    const lines = this.hiddenHeader ? [] : [[...(this.hiddenIndex ? [] : ['']), ...cols.map((j) => this.data.columns[j])].join(sep)];
+    for (const i of rows) lines.push([...label(i), ...cols.map((j) => this.display(i, j))].join(sep));
     return lines.join('\n') + '\n';
   }
 
@@ -423,10 +443,11 @@ export class Styler {
   toLatex(options: { hrules?: boolean; caption?: string; label?: string; position?: string; environment?: 'table' | null; columnFormat?: string } = {}): string {
     const df = this.data;
     const cols = df.columns.map((_, j) => j).filter((j) => !this.hiddenCols.has(j));
+    const rows = Array.from({ length: df.length }, (_, i) => i).filter((i) => !this.hiddenRows.has(i));
     return latexTable(
-      this.hiddenIndex ? null : df.index.labels.map((l) => (this.indexFormatter ? this.indexFormatter(l) : formatScalar(l))),
+      this.hiddenIndex ? null : rows.map((i) => df.index.labels[i]).map((l) => (this.indexFormatter ? this.indexFormatter(l) : formatScalar(l))),
       cols.map((j) => df.columns[j]),
-      Array.from({ length: df.length }, (_, i) => i).filter((i) => !this.hiddenRows.has(i)).map((i) => cols.map((j) => this.display(i, j))),
+      rows.map((i) => cols.map((j) => this.display(i, j))),
       cols.map((j) => isNumericDType(df._column(df.columns[j]).dtype)),
       { ...options, caption: options.caption ?? this.caption ?? undefined, hrules: options.hrules ?? false },
     );

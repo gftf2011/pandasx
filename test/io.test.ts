@@ -37,6 +37,12 @@ describe('CSV', () => {
     const csv = new DataFrame({ v: [1] }, { index: ['r1'] }).toCsv();
     assert.equal(csv, ',v\nr1,1\n');
   });
+  it('floatFormat accepts printf, Python format specs or a function (pandas float_format)', () => {
+    const df = new DataFrame({ a: [1.23456, null, 1234.5], s: ['x', 'y', 'z'] });
+    assert.equal(df.toCsv(undefined, { floatFormat: '%.2f', index: false }), 'a,s\n1.23,x\n,y\n1234.50,z\n');
+    assert.equal(df.toCsv(undefined, { floatFormat: '{:,.1f}', index: false }), 'a,s\n1.2,x\n,y\n"1,234.5",z\n');
+    assert.equal(df.toCsv(undefined, { floatFormat: (v) => v.toFixed(0), index: false }), 'a,s\n1,x\n,y\n1235,z\n');
+  });
 });
 
 describe('JSON', () => {

@@ -138,6 +138,29 @@ console.log(pd.toDatetime(['2024-12-24']).add(holidays).dt.date.toArray());
 
 ## Indexing by time
 
+On a datetime index, `loc` accepts date strings, like pandas. A partial date selects the whole period ('2024-03' is the month, '2024-03-01' the day), and slice bounds need not exist in the index:
+
+```ts run
+import * as pd from 'pandasx';
+
+const s = new pd.Series([0, 1, 2, 3, 4, 5], { index: pd.dateRange('2024-02-28 22:00', { periods: 6, freq: 'h' }).toArray() as Date[] });
+console.log(s.loc('2024-02-29'));
+console.log(s.loc(pd.slice('2024-02-29 00:30', '2024-02-29 02:00')).toArray());
+console.log(s.loc(pd.slice(null, '2024-02-28')).toArray());
+console.log(s.loc('2024-02-29 01:00'));
+```
+
+```text
+2024-02-29 00:00:00  2
+2024-02-29 01:00:00  3
+2024-02-29 02:00:00  4
+2024-02-29 03:00:00  5
+dtype: int64
+[ 3, 4 ]
+[ 0, 1 ]
+3
+```
+
 ```ts run
 import * as pd from 'pandasx';
 

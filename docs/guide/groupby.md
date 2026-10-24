@@ -134,7 +134,7 @@ console.log(g.apply((d) => d.get('units').max()));
 ```text
    region  units  share
 0       N     10   0.53
-1       S      5   0.63
+1       S      5   0.62
 2       N      7   0.37
 3       S      3   0.38
 4       N      2   0.11

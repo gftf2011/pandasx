@@ -11,6 +11,20 @@ function group(intPart: string, sep: string): string {
 }
 
 /** Formats one value with a format spec (the part after ':' in Python). */
+/**
+ * `a.toFixed(p)` for a ≥ 0, but an exact tie rounds to even like Python / C printf
+ * (8.25 → '8.2', 0.125 → '0.12'); JavaScript rounds ties up. Non-ties are identical.
+ */
+function fixedHalfEven(a: number, p: number): string {
+  const rounded = a.toFixed(p);
+  if (a >= 1e21 || p > 70) return rounded;
+  const exact = a.toFixed(p + 30);           // exact digits of the double, well past any tie
+  const cut = exact.indexOf('.') + 1 + p;
+  if (!/^50*$/.test(exact.slice(cut))) return rounded;
+  const truncated = exact.slice(0, p === 0 ? cut - 1 : cut);
+  return Number(truncated.at(-1)) % 2 === 0 ? truncated : rounded;
+}
+
 export function formatSpec(value: unknown, spec: string): string {
   const m = SPEC.exec(spec);
   if (!m) throw new Error(`Invalid format spec: ${spec}`);
@@ -26,13 +40,13 @@ export function formatSpec(value: unknown, spec: string): string {
       negative = num < 0 || Object.is(num, -0);
       const a = Math.abs(num);
       switch (type) {
-        case 'f': case 'F': body = a.toFixed(precision ?? 6); break;
+        case 'f': case 'F': body = fixedHalfEven(a, precision ?? 6); break;
         case 'e': case 'E': {
           body = a.toExponential(precision ?? 6).replace(/e([+-])(\d)$/, 'e$10$2');
           if (type === 'E') body = body.toUpperCase();
           break;
         }
-        case '%': body = (a * 100).toFixed(precision ?? 6) + '%'; break;
+        case '%': body = fixedHalfEven(a * 100, precision ?? 6) + '%'; break;
         case 'd': case 'n': body = String(typeof value === 'bigint' ? (value < 0n ? -value : value) : Math.round(a)); break;
         case 'b': body = (alt ? '0b' : '') + Math.trunc(a).toString(2); break;
         case 'o': body = (alt ? '0o' : '') + Math.trunc(a).toString(8); break;

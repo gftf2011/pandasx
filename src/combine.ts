@@ -126,7 +126,7 @@ export function compare(a: Series | DataFrame, b: Series | DataFrame, o: { keepS
   const cols: [Label[], Column][] = [];
   pairs.forEach(([name, x, y], j) => {
     if (!keepCols[j]) return;
-    const pick = (s: Series) => Column.from(rows.map((i) => (diff[j][i] || o.keepEqual ? s._col.get(i) : null)));
+    const pick = (s: Series) => Column.fromLike(rows.map((i) => (diff[j][i] || o.keepEqual ? s._col.get(i) : null)), s._col);
     if (a instanceof Series) { cols.push([[selfName], pick(x)], [[otherName], pick(y)]); return; }
     cols.push([[name, selfName], pick(x)], [[name, otherName], pick(y)]);
   });

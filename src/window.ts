@@ -111,10 +111,13 @@ abstract class Window<T extends WindowTarget = WindowTarget> {
   }
 
   /**
-   * Applies `fn` to each window: a Float64Array when `raw` (default), else a Series.
+   * Applies `fn` to each window: a Series by default, like pandas (`raw=False`),
+   * or a Float64Array of the values with `{ raw: true }` (faster).
    */
+  apply(fn: (window: Series) => number, options?: { raw?: false }): T;
+  apply(fn: (values: Float64Array) => number, options: { raw: true }): T;
   apply(fn: (values: any) => number, options: { raw?: boolean } = {}): T {
-    const raw = options.raw ?? true;
+    const raw = options.raw ?? false;
     return this.run((x, b, m) => perWindow(x, b, m, (vals, _last, s, e) => (raw ? fn(vals) : fn(new Series(vals, { index: this.target.index.labels.slice(s, e) })))));
   }
 

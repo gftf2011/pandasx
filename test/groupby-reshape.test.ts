@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { concat, DataFrame, merge, Series, dateRange, toDatetime } from '../src/index.ts';
+import { categorical, concat, DataFrame, merge, Series, dateRange, toDatetime } from '../src/index.ts';
 
 const sales = () =>
   new DataFrame({
@@ -11,6 +11,28 @@ const sales = () =>
   });
 
 describe('groupby', () => {
+  it('named aggregation may reuse a column name as the output name', () => {
+    const df = new DataFrame({ k: ['a', 'b', 'a'], revenue: [1, 2, 3], units: [1, 2, 3] });
+    const named = df.groupby('k').agg({ revenue: ['revenue', 'sum'], tickets: ['revenue', 'count'], units: ['units', 'max'] });
+    assert.deepEqual(named.toDict('list'), { revenue: [4, 2], tickets: [2, 1], units: [3, 2] });
+    assert.deepEqual(df.groupby('k').agg({ revenue: ['min', 'max'] }).columnIndex.toArray(), [['revenue', 'min'], ['revenue', 'max']]);
+  });
+  it('asIndex: false keeps the keys as columns for a selected column', () => {
+    const df = new DataFrame({ k: ['b', 'a', 'b'], j: ['x', 'x', 'y'], v: [1, 2, 3] });
+    assert.deepEqual(df.groupby('k', { asIndex: false }).get('v').sum().toDict('list'), { k: ['a', 'b'], v: [2, 4] });
+    assert.deepEqual(df.groupby('k', { asIndex: false }).get('v').size().toDict('list'), { k: ['a', 'b'], size: [1, 2] });
+    assert.deepEqual(df.groupby(['k', 'j'], { asIndex: false }).get('v').mean().toDict('list'), { k: ['a', 'b', 'b'], j: ['x', 'x', 'y'], v: [2, 1, 3] });
+    assert.throws(() => new Series([1]).groupby([1], { asIndex: false }), /only valid when grouping a DataFrame/);
+    assert.deepEqual(df.groupby('k').get('v').sum().resetIndex().columns, ['k', 'v']);
+  });
+  it('orders categorical keys by category, like pandas', () => {
+    const level = categorical(['high', 'low', 'high', 'mid', 'mid'], { categories: ['low', 'mid', 'high'], ordered: true });
+    assert.deepEqual(new Series([3, 1, 4, 1, 5]).groupby(level).sum().toDict(), { low: 1, mid: 6, high: 7 });
+    const unordered = categorical(['b', 'a', 'b'], { categories: ['b', 'a'] });
+    assert.deepEqual(new Series([1, 2, 3]).groupby(unordered).sum().index.toArray(), ['b', 'a']);
+    const df = new DataFrame({ u: [3, 1, 4, 1, 5], lvl: level, k: ['x', 'x', 'y', 'y', 'x'] });
+    assert.deepEqual(df.groupby(['lvl', 'k']).get('u').sum().index.toArray(), [['low', 'x'], ['mid', 'x'], ['mid', 'y'], ['high', 'x'], ['high', 'y']]);
+  });
   it('sum per group sorted by key, dropping NA keys', () => {
     const r = sales().groupby('region').sum();
     assert.deepEqual(r.index.toArray(), ['N', 'S']);

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { Series, slice, KeyError } from '../src/index.ts';
+import { DataFrame, Series, slice, KeyError } from '../src/index.ts';
 
 describe('Series construction & dtypes', () => {
   it('infers dtypes', () => {
@@ -62,7 +62,42 @@ describe('Series selection', () => {
   });
 });
 
+describe('round', () => {
+  it('rounds half to even like NumPy / pandas', () => {
+    const cases: [number, number, number][] = [[2.675, 2, 2.68], [0.125, 2, 0.12], [23.6825, 3, 23.682], [1.005, 2, 1], [2.5, 0, 2], [3.5, 0, 4], [-0.125, 2, -0.12], [1234.5, -1, 1230], [0.285, 2, 0.28], [-2.5, 0, -2]];
+    for (const [x, d, want] of cases) assert.equal(new Series([x]).round(d).iat(0), want, `round(${x}, ${d})`);
+  });
+});
+
+describe('quantile interpolation and pipe', () => {
+  it('matches pandas for every interpolation', () => {
+    const s = new Series([1, 2, 3, 4]);
+    const methods = ['linear', 'lower', 'higher', 'midpoint', 'nearest'] as const;
+    assert.deepEqual(methods.map((m) => s.quantile(0.5, { interpolation: m })), [2.5, 2, 3, 2.5, 3]);
+    assert.deepEqual(s.quantile([0.1, 0.9], { interpolation: 'nearest' }).toArray(), [1, 4]);
+    const df = new DataFrame({ a: [1, 2, 3, 4], b: [10, 20, 30, 40] });
+    assert.deepEqual(df.quantile(0.25, { interpolation: 'higher' }).toArray(), [2, 20]);
+  });
+  it('pipe passes the object and extra arguments', () => {
+    const df = new DataFrame({ a: [1, 2] });
+    const scaled = df.pipe((d, k: number) => d.mul(k), 10);
+    assert.deepEqual(scaled.get('a').toArray(), [10, 20]);
+    assert.equal(new Series([1, 2, 3]).pipe((s) => s.sum()), 6);
+  });
+});
+
 describe('Series arithmetic & alignment', () => {
+  it('fillValue fills one-sided holes, like pandas fill_value', () => {
+    const a = new Series([1, null, 3, null], { index: ['a', 'b', 'c', 'd'] });
+    const b = new Series([10, 20, null], { index: ['b', 'c', 'e'] });
+    const r = a.add(b, { fillValue: 0 });
+    assert.deepEqual(r.index.toArray(), ['a', 'b', 'c', 'd', 'e']);
+    assert.deepEqual(r.toArray(), [1, 10, 23, NaN, NaN]);              // both missing stays NA
+    assert.deepEqual(a.rsub(5, { fillValue: 0 }).toArray(), [4, 5, 2, 5]);
+    const x = new DataFrame({ p: [1, null], q: [3, 4] });
+    const y = new DataFrame({ p: [10, 20], r: [5, null] });
+    assert.deepEqual(x.mul(y, { fillValue: 1 }).toDict('list'), { p: [10, 20], q: [3, 4], r: [5, NaN] });
+  });
   it('broadcasts scalars and keeps int64', () => {
     const r = new Series([1, 2, 3]).add(1);
     assert.equal(r.dtype, 'int64');

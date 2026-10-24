@@ -58,6 +58,9 @@ export type AggName =
   | 'any'
   | 'all';
 
+/** Every aggregation name, for telling `['col', 'sum']` (named aggregation) from `['sum', 'mean']`. */
+export const AGG_NAMES: ReadonlySet<string> = new Set<AggName>(['sum', 'mean', 'median', 'min', 'max', 'count', 'std', 'var', 'sem', 'prod', 'first', 'last', 'nunique', 'size', 'any', 'all']);
+
 export const NUMERIC_DTYPES: ReadonlySet<DType> = new Set<DType>(['float64', 'int64', 'bool', 'Int64', 'Float64', 'boolean', 'bigint']);
 
 /** Dtypes whose missing values read back as `null` (pandas `pd.NA`) rather than NaN. */

@@ -1,7 +1,7 @@
 import { aggregate, NUMERIC_AGGS } from './core/aggregate.ts';
 import { Column } from './core/column.ts';
 import { Index } from './core/indexes.ts';
-import { isNumericDType, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
+import { AGG_NAMES, isNumericDType, NULLABLE_DTYPES, type AggName, type DType, type Label } from './core/types.ts';
 import { compareValues, hashKey, isNA } from './core/values.ts';
 import { colKey, DataFrame } from './frame.ts';
 import { concat } from './reshape.ts';
@@ -51,11 +51,14 @@ export function computeGroups(keyCols: readonly Column[], n: number, sort: boole
     rows[g].push(i);
   }
   if (!sort) return { keys, rows };
+  // Categorical keys sort in category order (ordered or not), like pandas.
+  const catPos = keyCols.map((c) => (c.dtype === 'category' ? new Map(c.meta.categories!.map((v, k) => [hashKey(v), k])) : null));
   const order = keys.map((_, g) => g).sort((a, b) => {
     const ka = keys[a], kb = keys[b];
     for (let l = 0; l < ka.length; l++) {
       if (ka[l] === null || kb[l] === null) { if (ka[l] !== kb[l]) return ka[l] === null ? 1 : -1; continue; }
-      const c = compareValues(ka[l], kb[l]);
+      const pos = catPos[l];
+      const c = pos ? pos.get(hashKey(ka[l]))! - pos.get(hashKey(kb[l]))! : compareValues(ka[l], kb[l]);
       if (c !== 0) return c;
     }
     return 0;
@@ -229,7 +232,11 @@ export abstract class BaseGroupBy {
 }
 
 /** Result of `DataFrame.groupby(...)`. */
-export class DataFrameGroupBy extends BaseGroupBy {
+/**
+ * `R` is what reductions return: a Series indexed by the group keys, or a
+ * DataFrame with the keys as columns when grouping with `{ asIndex: false }`.
+ */
+export class DataFrameGroupBy<R extends Series | DataFrame = Series> extends BaseGroupBy {
   private readonly selection: readonly string[] | null;
 
   constructor(frame: DataFrame, by: readonly string[], options: GroupByOptions = {}, selection: readonly string[] | null = null, keyNames?: readonly (string | null)[]) {
@@ -246,14 +253,14 @@ export class DataFrameGroupBy extends BaseGroupBy {
   }
 
   /** `groupby(...).get('col')` ≈ `groupby(...)['col']`. */
-  get(column: string): SeriesGroupBy;
-  get(columns: readonly string[]): DataFrameGroupBy;
-  get(key: string | readonly string[]): SeriesGroupBy | DataFrameGroupBy {
+  get(column: string): SeriesGroupBy<R>;
+  get(columns: readonly string[]): DataFrameGroupBy<R>;
+  get(key: string | readonly string[]): SeriesGroupBy<R> | DataFrameGroupBy<R> {
     if (typeof key === 'string') {
       this._frame._column(key);
-      return new SeriesGroupBy(this._frame, this._by, key, this.options, this._keyNames, key);
+      return new SeriesGroupBy<R>(this._frame, this._by, key, this.options, this._keyNames, key);
     }
-    return new DataFrameGroupBy(this._frame, this._by, this.options, key, this._keyNames);
+    return new DataFrameGroupBy<R>(this._frame, this._by, this.options, key, this._keyNames);
   }
 
   /** Rows per group. */
@@ -314,7 +321,9 @@ export class DataFrameGroupBy extends BaseGroupBy {
       }
     } else {
       const entries = Object.entries(spec as Record<string, AggFunc | readonly AggFunc[] | readonly [string, AggFunc]>);
-      const isNamed = (key: string, v: unknown) => Array.isArray(v) && v.length === 2 && typeof v[0] === 'string' && this._frame.has(v[0]) && !this._frame.has(key);
+      // [column, func] is named aggregation (pandas' ('col', 'func') tuple) unless the key is a
+      // column and the pair reads as two function names, e.g. { a: ['min', 'max'] }.
+      const isNamed = (key: string, v: unknown) => Array.isArray(v) && v.length === 2 && typeof v[0] === 'string' && this._frame.has(v[0]) && (!this._frame.has(key) || !AGG_NAMES.has(v[0]));
       multi = entries.some(([k, v]) => Array.isArray(v) && !isNamed(k, v));
       for (const [key, v] of entries) {
         if (isNamed(key, v)) add(key, (v as readonly [string, AggFunc])[0], (v as readonly [string, AggFunc])[1]);
@@ -378,7 +387,7 @@ export class DataFrameGroupBy extends BaseGroupBy {
   }
 
   /** Applies a per-group Series transform to every value column. */
-  private eachColumn(fn: (g: SeriesGroupBy) => Series, numericOnly = false): DataFrame {
+  private eachColumn(fn: (g: SeriesGroupBy<R>) => Series, numericOnly = false): DataFrame {
     const cols = new Map<string, Column>();
     for (const name of this.valueColumns()) {
       const col = this._frame._column(name);
@@ -453,8 +462,11 @@ export class DataFrameGroupBy extends BaseGroupBy {
   }
 }
 
-/** Result of `groupby(...).get('col')` or `Series.groupby(...)`. */
-export class SeriesGroupBy extends BaseGroupBy {
+/**
+ * Result of `groupby(...).get('col')` or `Series.groupby(...)`. Reductions return
+ * `R`: a Series by default, or a DataFrame (keys as columns) with `{ asIndex: false }`.
+ */
+export class SeriesGroupBy<R extends Series | DataFrame = Series> extends BaseGroupBy {
   private readonly column: string;
   private readonly resultName: string | null;
 
@@ -472,35 +484,35 @@ export class SeriesGroupBy extends BaseGroupBy {
     return Series._from(this.col().take(rows), this._frame.index.take(rows), this.resultName);
   }
 
-  private series(col: Column): Series {
-    if (this.options.asIndex) return Series._from(col, this._keyIndex(), this.resultName);
-    return Series._from(col, Index.range(this.ngroups), this.resultName);
+  private series(col: Column, name: string | null = this.resultName): R {
+    if (this.options.asIndex) return Series._from(col, this._keyIndex(), name) as R;
+    return this._wrap(new Map([[name ?? '0', col]])) as R;
   }
 
-  size(): Series {
-    return this.series(Column.from(this._groups.rows.map((r) => r.length), 'int64')).rename('size');
+  size(): R {
+    return this.series(Column.from(this._groups.rows.map((r) => r.length), 'int64'), 'size');
   }
 
-  private reduce(agg: AggFunc): Series {
+  private reduce(agg: AggFunc): R {
     return this.series(this._aggColumn(this.col(), agg, this.column));
   }
 
-  sum(): Series { return this.reduce('sum'); }
-  prod(): Series { return this.reduce('prod'); }
-  mean(): Series { return this.reduce('mean'); }
-  median(): Series { return this.reduce('median'); }
-  std(): Series { return this.reduce('std'); }
-  var(): Series { return this.reduce('var'); }
-  min(): Series { return this.reduce('min'); }
-  max(): Series { return this.reduce('max'); }
-  count(): Series { return this.reduce('count'); }
-  first(): Series { return this.reduce('first'); }
-  last(): Series { return this.reduce('last'); }
-  nunique(): Series { return this.reduce('nunique'); }
+  sum(): R { return this.reduce('sum'); }
+  prod(): R { return this.reduce('prod'); }
+  mean(): R { return this.reduce('mean'); }
+  median(): R { return this.reduce('median'); }
+  std(): R { return this.reduce('std'); }
+  var(): R { return this.reduce('var'); }
+  min(): R { return this.reduce('min'); }
+  max(): R { return this.reduce('max'); }
+  count(): R { return this.reduce('count'); }
+  first(): R { return this.reduce('first'); }
+  last(): R { return this.reduce('last'); }
+  nunique(): R { return this.reduce('nunique'); }
 
   /** One func → Series; a list of funcs → DataFrame with one column per func. */
   agg(func: AggFunc | readonly AggFunc[] | Record<string, AggFunc>): Series | DataFrame {
-    if (typeof func === 'string' || typeof func === 'function') return this.reduce(func);
+    if (typeof func === 'string' || typeof func === 'function') return this.reduce(func) as Series | DataFrame;
     const entries: [string, AggFunc][] = Array.isArray(func)
       ? (func as readonly AggFunc[]).map((f, i) => [typeof f === 'function' ? f.name || `func${i}` : f, f])
       : Object.entries(func as Record<string, AggFunc>);
@@ -514,7 +526,7 @@ export class SeriesGroupBy extends BaseGroupBy {
   }
 
   /** Calls `fn(groupSeries, key)` per group; scalars → Series indexed by group. */
-  apply(fn: (group: Series, key: Label) => unknown): Series {
+  apply(fn: (group: Series, key: Label) => unknown): Series | R {
     const g = this._groups;
     const col = this.col();
     const results = g.rows.map((r, i) => fn(Series._from(col.take(r), this._frame.index.take(r), this.resultName), this.label(g.keys[i])));
@@ -555,9 +567,9 @@ export class SeriesGroupBy extends BaseGroupBy {
     return Series._from(col.take(pos), this._frame.index.take(pos), this.resultName);
   }
 
-  sem(): Series { return this.reduce('sem'); }
-  any(): Series { return this.reduce('any'); }
-  all(): Series { return this.reduce('all'); }
+  sem(): R { return this.reduce('sem'); }
+  any(): R { return this.reduce('any'); }
+  all(): R { return this.reduce('all'); }
   cumsum(): Series { return this.transform((s) => s.cumsum()); }
   cumprod(): Series { return this.transform((s) => s.cumprod()); }
   cummax(): Series { return this.transform((s) => s.cummax()); }
@@ -570,9 +582,9 @@ export class SeriesGroupBy extends BaseGroupBy {
   bfill(limit?: number): Series { return this.transform((s) => s.bfill(limit)); }
   fillna(value: unknown): Series { return this.transform((s) => s.fillna(value)); }
 
-  quantile(q = 0.5): Series { return this.reduce((s) => s.quantile(q)); }
-  idxmax(): Series { return this.reduce((s) => s.idxmax()); }
-  idxmin(): Series { return this.reduce((s) => s.idxmin()); }
+  quantile(q = 0.5): R { return this.reduce((s) => s.quantile(q)); }
+  idxmax(): R { return this.reduce((s) => s.idxmax()); }
+  idxmin(): R { return this.reduce((s) => s.idxmin()); }
 
   /** n-th value(s) of each group, keeping the original index. */
   nth(n: number | readonly number[]): Series {

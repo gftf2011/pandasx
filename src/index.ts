@@ -1,4 +1,4 @@
-export { Series, KeyError, type SeriesInput, type SeriesOptions, type Mask, type Operand } from './series.ts';
+export { Series, KeyError, type SeriesInput, type SeriesOptions, type Mask, type Operand, type ArithOptions } from './series.ts';
 export { DataFrame, type FrameInput, type FrameOptions, type AxisAggOptions, type ColSelector, type ColumnValue } from './frame.ts';
 export type { AggFunc, RowSelector } from './series.ts';
 export type { AggOptions, QuantileInterpolation } from './core/aggregate.ts';

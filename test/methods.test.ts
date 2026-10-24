@@ -92,6 +92,12 @@ describe('string methods', () => {
     assert.deepEqual(s.str.match(/[A-Z]/).toArray(), [true, false, false, true]);
     assert.deepEqual(s.str.fullmatch('[a-z]+').toArray(), [false, true, false, false]);
     assert.deepEqual(s.str.contains('a', { case: false, na: false }).toArray(), [true, false, false, true]);
+    // A string pattern is a regex by default, like pandas (regex=True).
+    const cities = new Series(['Porto Alegre', 'Rio', 'a.b', 'ab']);
+    assert.deepEqual(cities.str.contains('Porto|Rio').toArray(), [true, true, false, false]);
+    assert.deepEqual(cities.str.contains('a.b').toArray(), [false, false, true, false]);
+    assert.deepEqual(cities.str.contains('a.b', { regex: false }).toArray(), [false, false, true, false]);
+    assert.deepEqual(cities.str.contains('PORTO', { case: false }).toArray(), [true, false, false, false]);
     assert.deepEqual(s.str.title().toArray(), ['Ana Maria', 'Bruno', null, 'Carla-Souza']);
     assert.deepEqual(s.str.swapcase().iat(1), 'BRUNO');
     assert.deepEqual(s.str.findall(/a/i).iat(0), ['A', 'a', 'a', 'a']);
