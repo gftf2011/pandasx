@@ -18,6 +18,26 @@ const expected = () => new DataFrame({
   t: pd.toDatetime(['2024-01-01', '2024-01-02 10:00', null]).toArray(),
 }, { index: new pd.Index(['r1', 'r2', 'r3'], { name: 'id' }) });
 
+// The Brotli files here are written by the tests themselves, so they are read even
+// on a Node.js whose decoder has CVE-2026-111497 (see brotli-guard.test.ts).
+function trustBrotli<T>(fn: () => T): T {
+  const saved = process.env.PANDASX_ALLOW_VULNERABLE_BROTLI;
+  process.env.PANDASX_ALLOW_VULNERABLE_BROTLI = '1';
+  const restore = () => {
+    if (saved === undefined) delete process.env.PANDASX_ALLOW_VULNERABLE_BROTLI;
+    else process.env.PANDASX_ALLOW_VULNERABLE_BROTLI = saved;
+  };
+  try {
+    const r = fn();
+    if (r instanceof Promise) return r.finally(restore) as T;
+    restore();
+    return r;
+  } catch (e) {
+    restore();
+    throw e;
+  }
+}
+
 const sameData = (a: DataFrame, b: DataFrame) => {
   assert.deepEqual(a.columns, b.columns);
   assert.deepEqual(a.index.toArray(), b.index.toArray());
@@ -30,7 +50,7 @@ describe('compression and CSV extensions', () => {
     sameData(df, expected());
     for (const ext of ['csv.gz', 'csv.zst', 'csv.br', 'csv.zip', 'csv.zz']) {
       expected().toCsv(out(`x.${ext}`));
-      sameData(pd.readCsv(out(`x.${ext}`), { indexCol: 'id', parseDates: ['t'] }), expected());
+      sameData(trustBrotli(() => pd.readCsv(out(`x.${ext}`), { indexCol: 'id', parseDates: ['t'] })), expected());
     }
   });
   it('chunks (sync and streaming)', async () => {
@@ -142,8 +162,8 @@ describe('optional binary formats', () => {
   });
   it('Parquet: gzip / brotli / zstd / lz4 pages, read and written', async () => {
     for (const codec of ['gzip', 'brotli', 'zstd', 'lz4'] as const) {
-      sameData(await pd.readParquet(fx(`pandas_${codec}.parquet`)), expected());
-      sameData(await pd.readParquet(await expected().toParquet(undefined, { compression: codec })), expected());
+      sameData(await trustBrotli(() => pd.readParquet(fx(`pandas_${codec}.parquet`))), expected());
+      sameData(await trustBrotli(async () => pd.readParquet(await expected().toParquet(undefined, { compression: codec }))), expected());
     }
   });
   it('Feather: reads pandas (lz4) files and round-trips', async () => {

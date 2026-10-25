@@ -9,7 +9,7 @@ import { Index } from '../core/indexes.ts';
 import type { Label } from '../core/types.ts';
 import { isNA } from '../core/values.ts';
 import { DataFrame } from '../frame.ts';
-import { readBytes, requireOptional, type Source } from './source.ts';
+import { brotliDecompressSync, readBytes, requireOptional, type Source } from './source.ts';
 
 type Codec = (input: Uint8Array, outputLength: number) => Uint8Array;
 
@@ -21,7 +21,7 @@ async function parquetCodecs(): Promise<{ read: Record<string, Codec>; write: Re
   return {
     read: {
       GZIP: (d) => u8(zlib.gunzipSync(d)),
-      BROTLI: (d) => u8(zlib.brotliDecompressSync(d)),
+      BROTLI: (d) => u8(brotliDecompressSync(d, 'Parquet BROTLI page')),
       ZSTD: (d) => u8(zlib.zstdDecompressSync(d)),
       LZ4_RAW: (d, n) => lz4BlockDecode(d, n),
     },

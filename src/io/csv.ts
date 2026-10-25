@@ -1,7 +1,7 @@
 import { appendFileSync, createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import * as zlib from 'node:zlib';
-import { inferCompression, readText, readTextSync, writeOutput, type Compression, type Source } from './source.ts';
+import { assertBrotliSafe, checkContentEncoding, inferCompression, readText, readTextSync, writeOutput, type Compression, type Source } from './source.ts';
 import { toDatetime } from '../datetimes.ts';
 import { pyFloat } from '../core/interval.ts';
 import { formatSpec, pyFormat } from '../core/pyformat.ts';
@@ -108,9 +108,11 @@ export async function* readCsvChunks(source: string | URL, options: ReadCsvOptio
   if (remote) {
     const res = await fetch(s, options.storageOptions);
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} fetching ${s}`);
+    checkContentEncoding(res, s);
     stream = res.body as unknown as AsyncIterable<Uint8Array>;
   } else stream = createReadStream(s.startsWith('file:') ? new URL(s) : s);
   if (compression === 'zip') throw new Error('Streaming zip archives is not supported; use readCsv');
+  if (compression === 'brotli') assertBrotliSafe(`streaming ${s}`);
   if (compression) {
     const z = compression === 'gzip' ? zlib.createGunzip() : compression === 'deflate' ? zlib.createInflate() : compression === 'brotli' ? zlib.createBrotliDecompress() : zlib.createZstdDecompress();
     stream = Readable.from(stream).pipe(z);

@@ -6,7 +6,7 @@ For explanations, see the [documentation](https://gftf2011.github.io/pandasx/).
 
 ## Run them
 
-Requires Node.js ≥ 22.18. Node runs TypeScript files directly.
+Requires Node.js 22.23.4+, 24.22.1+ or 26.12.1+. Node runs TypeScript files directly.
 
 ```bash
 cd examples

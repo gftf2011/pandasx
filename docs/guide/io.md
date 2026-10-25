@@ -26,6 +26,18 @@ npm install h5wasm               # HDF5
 
 Files are interchangeable with pandas: a Parquet, Feather, Excel or HDF5 file written by one opens in the other with the same dtypes and index (with the few exceptions listed in [Differences](./differences)).
 
+### Brotli and CVE-2026-111497 (Node2Shell)
+
+[CVE-2026-111497](https://nodejs.org/en/blog/vulnerability) is an out-of-bounds write in the Brotli decoder bundled with Node.js: crafted Brotli data can crash the process or run code. It is fixed in Node.js **22.23.4, 24.22.1 and 26.12.1**; Node.js 20 and older have no fix.
+
+pandasx decompresses Brotli in four places: `.br` files (or `compression: 'brotli'`), `readCsvChunks` streams, Parquet files with Brotli pages, and URLs whose server answers with `Content-Encoding: br`. The last two happen without asking for Brotli, so on a vulnerable Node.js every one of them throws before the data reaches the decoder:
+
+```text
+Error: Refusing to decompress Brotli data (Parquet BROTLI page): the Brotli decoder in Node.js 24.21.0 is vulnerable to CVE-2026-111497 (Node2Shell). Upgrade to Node.js 22.23.4, 24.22.1, 26.12.1 or later, or set PANDASX_ALLOW_VULNERABLE_BROTLI=1 if you trust the data.
+```
+
+Upgrade Node.js to lift it. If you cannot and the data comes from a source you control, set `PANDASX_ALLOW_VULNERABLE_BROTLI=1`. Writing Brotli is not affected.
+
 ## CSV
 
 ```ts run

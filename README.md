@@ -19,7 +19,7 @@
 npm install pandasx
 ```
 
-Requires Node.js ≥ 22.18.
+Requires Node.js 22.23.4+, 24.22.1+ or 26.12.1+: earlier releases have a Brotli decoder vulnerable to [CVE-2026-111497 (Node2Shell)](https://gftf2011.github.io/pandasx/guide/io#brotli-and-cve-2026-111497-node2shell).
 
 ## Example
 

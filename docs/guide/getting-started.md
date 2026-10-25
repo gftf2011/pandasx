@@ -8,7 +8,7 @@ pandasx brings pandas' `Series` and `DataFrame` to Node.js. If you know pandas, 
 npm install pandasx
 ```
 
-pandasx needs **Node.js 22.18 or newer** and has no required dependencies. Some file formats use optional packages that you install only if you need them:
+pandasx needs **Node.js 22.23.4+, 24.22.1+ or 26.12.1+** (earlier releases have the [Node2Shell](./io#brotli-and-cve-2026-111497-node2shell) Brotli bug) and has no required dependencies. Some file formats use optional packages that you install only if you need them:
 
 | Format | Install |
 |---|---|

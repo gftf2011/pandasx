@@ -26,6 +26,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          # Latest patch release: older ones have CVE-2026-111497 (Node2Shell).
+          check-latest: true
           registry-url: https://registry.npmjs.org
           cache: npm
 

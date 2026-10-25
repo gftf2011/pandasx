@@ -29,12 +29,61 @@ function sniff(buf: Uint8Array): Exclude<Compression, 'infer' | null> | null {
   return null;
 }
 
+/**
+ * Fixed releases for CVE-2026-111497 ("Node2Shell"), an out-of-bounds write in the
+ * Brotli decoder bundled with Node.js: major version -> first fixed [minor, patch].
+ */
+const BROTLI_FIXED: Record<number, readonly [number, number]> = { 22: [23, 4], 24: [22, 1], 26: [12, 1] };
+
+let runtimeVersion = process.versions.node;
+
+/** @internal Pretends to run on another Node.js version (tests only); no argument restores the real one. */
+export function _setNodeVersion(version: string = process.versions.node): void {
+  runtimeVersion = version;
+}
+
+/** Whether this Node.js version's Brotli decoder has CVE-2026-111497 (lines without a fix, like 20, count as vulnerable). */
+export function brotliVulnerable(version: string = runtimeVersion): boolean {
+  const [major, minor, patch] = version.split('.').map(Number);
+  if (major > 26) return false;
+  const fixed = BROTLI_FIXED[major];
+  if (!fixed) return true;
+  return minor < fixed[0] || (minor === fixed[0] && patch < fixed[1]);
+}
+
+/**
+ * Throws before Brotli data reaches a vulnerable decoder. Set
+ * PANDASX_ALLOW_VULNERABLE_BROTLI=1 to decompress anyway (only for trusted data).
+ */
+export function assertBrotliSafe(what: string, version: string = runtimeVersion): void {
+  if (!brotliVulnerable(version) || process.env.PANDASX_ALLOW_VULNERABLE_BROTLI === '1') return;
+  throw new Error(
+    `Refusing to decompress Brotli data (${what}): the Brotli decoder in Node.js ${version} is vulnerable to CVE-2026-111497 (Node2Shell). ` +
+      'Upgrade to Node.js 22.23.4, 24.22.1, 26.12.1 or later, or set PANDASX_ALLOW_VULNERABLE_BROTLI=1 if you trust the data.',
+  );
+}
+
+/** `zlib.brotliDecompressSync` behind `assertBrotliSafe`. */
+export function brotliDecompressSync(buf: Uint8Array, what = 'brotli compression'): Buffer {
+  assertBrotliSafe(what);
+  return zlib.brotliDecompressSync(buf);
+}
+
+/**
+ * fetch() decodes `Content-Encoding: br` bodies by itself, when the body is read;
+ * call this on the response first so a server cannot reach a vulnerable decoder.
+ */
+export function checkContentEncoding(res: Response, url: string): void {
+  const encoding = res.headers.get('content-encoding');
+  if (encoding && /(^|[\s,])br($|[\s,])/i.test(encoding)) assertBrotliSafe(`Content-Encoding: br from ${url}`);
+}
+
 export function decompress(buf: Uint8Array, c: Exclude<Compression, 'infer'>): Buffer {
   switch (c) {
     case null: return Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
     case 'gzip': return zlib.gunzipSync(buf);
     case 'deflate': return zlib.inflateSync(buf);
-    case 'brotli': return zlib.brotliDecompressSync(buf);
+    case 'brotli': return brotliDecompressSync(buf);
     case 'zstd': return zlib.zstdDecompressSync(buf);
     case 'zip': return unzipSingle(buf);
   }
@@ -71,6 +120,7 @@ export async function readBytes(source: Source, compression?: Compression, optio
   if ((typeof source === 'string' || source instanceof URL) && isUrl(String(source)) && !String(source).startsWith('file:')) {
     const res = await fetch(String(source), options.storageOptions);
     if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${String(source)}`);
+    checkContentEncoding(res, String(source));
     const raw = new Uint8Array(await res.arrayBuffer());
     const url = new URL(String(source));
     const c = compression === undefined || compression === 'infer' ? inferCompression(url.pathname, 'infer') ?? sniff(raw) : compression;
