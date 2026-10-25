@@ -45,7 +45,7 @@
     "h5wasm": "^0.10.3",
     "hyparquet": "^1.31.3",
     "hyparquet-writer": "^0.16.11",
-    "pandasx": "^0.1.4"
+    "pandasx": "^0.1.5"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",

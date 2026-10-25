@@ -4,7 +4,7 @@ How fast is pandasx next to other JavaScript dataframe libraries? The benchmark 
 
 | Tool | Version | Language |
 |---|---|---|
-| pandasx | 0.1.4 | TypeScript |
+| pandasx | 0.1.5 | TypeScript |
 | [Arquero](https://idl.uw.edu/arquero/) | 8.0.3 | JavaScript |
 | [danfo.js](https://danfo.jsdata.org/) | 1.2.0 | JavaScript |
 | [Data-Forge](https://github.com/data-forge/data-forge-ts) | 1.10.5 | JavaScript |
