@@ -836,10 +836,12 @@ export class Series {
       const b = right ? (right.data as ArrayLike<number>) : null;
       const sv = scalarNumber(scalar, left.dtype);
       const out = new Float64Array(n);
-      for (let i = 0; i < n; i++) {
-        const x = a[i];
-        const y = b ? b[i] : sv;
-        out[i] = reverse ? fn(y, x) : fn(x, y);
+      if (!numKernel(op, a, b, sv, reverse, out)) {
+        for (let i = 0; i < n; i++) {
+          const x = a[i];
+          const y = b ? b[i] : sv;
+          out[i] = reverse ? fn(y, x) : fn(x, y);
+        }
       }
       const lt = reverse ? rightDtype : left.dtype;
       const rt = reverse ? left.dtype : rightDtype;
@@ -898,6 +900,8 @@ export class Series {
 
   private cmp(op: string, other: Operand): Series {
     const { left, right, scalar, index } = this._align(other);
+    const fast = fastCmp(op, left, right, scalar);
+    if (fast) return new Series(new Column('bool', fast), { index, name: this.name });
     const test = CMP[op];
     const n = left.length;
     const ordering = op !== 'eq' && op !== 'ne';
@@ -935,6 +939,17 @@ export class Series {
   /** Boolean logic; with the nullable `boolean` dtype NA follows Kleene logic like pandas. */
   private logical(other: Operand, kind: 'and' | 'or' | 'xor'): Series {
     const { left, right, scalar, index } = this._align(other);
+    if (left.dtype === 'bool' && (right ? right.dtype === 'bool' : typeof scalar === 'boolean')) {
+      const a = left.data as Uint8Array;
+      const b = right ? (right.data as Uint8Array) : null;
+      const sv = scalar ? 1 : 0;
+      const out = new Uint8Array(a.length);
+      if (kind === 'and') { if (b) for (let i = 0; i < out.length; i++) out[i] = a[i] & b[i]; else if (sv) out.set(a); }
+      else if (kind === 'or') { if (b) for (let i = 0; i < out.length; i++) out[i] = a[i] | b[i]; else if (sv) out.fill(1); else out.set(a); }
+      else if (b) for (let i = 0; i < out.length; i++) out[i] = a[i] ^ b[i];
+      else for (let i = 0; i < out.length; i++) out[i] = a[i] ^ sv;
+      return new Series(new Column('bool', out), { index, name: this.name });
+    }
     const kleene = left.dtype === 'boolean' || right?.dtype === 'boolean';
     const val = (c: Column, i: number) => (c.isNA(i) ? (kleene ? NaN : 0) : c.get(i) ? 1 : 0);
     const sv = isNA(scalar) ? (kleene ? NaN : 0) : scalar ? 1 : 0;
@@ -1263,6 +1278,80 @@ function scalarNumber(v: unknown, like: DType): number {
   if (v instanceof Period) return v.ordinal;
   if (typeof v === 'string' && like === 'timedelta') return parseTimedelta(v);
   return Number(v);
+}
+
+/**
+ * Monomorphic loops for the common arithmetic operators; returns false for the
+ * others so the caller uses the generic loop.
+ */
+function numKernel(op: string, a: ArrayLike<number>, b: ArrayLike<number> | null, sv: number, reverse: boolean, out: Float64Array): boolean {
+  const n = out.length;
+  switch (op) {
+    case 'add':
+      if (b) for (let i = 0; i < n; i++) out[i] = a[i] + b[i];
+      else for (let i = 0; i < n; i++) out[i] = a[i] + sv;
+      return true;
+    case 'mul':
+      if (b) for (let i = 0; i < n; i++) out[i] = a[i] * b[i];
+      else for (let i = 0; i < n; i++) out[i] = a[i] * sv;
+      return true;
+    case 'sub':
+      if (b) { if (reverse) for (let i = 0; i < n; i++) out[i] = b[i] - a[i]; else for (let i = 0; i < n; i++) out[i] = a[i] - b[i]; }
+      else if (reverse) for (let i = 0; i < n; i++) out[i] = sv - a[i];
+      else for (let i = 0; i < n; i++) out[i] = a[i] - sv;
+      return true;
+    case 'div':
+      if (b) { if (reverse) for (let i = 0; i < n; i++) out[i] = b[i] / a[i]; else for (let i = 0; i < n; i++) out[i] = a[i] / b[i]; }
+      else if (reverse) for (let i = 0; i < n; i++) out[i] = sv / a[i];
+      else for (let i = 0; i < n; i++) out[i] = a[i] / sv;
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Comparison of a non-nullable float64 / int64 column with a number or another such
+ * column, and equality of a string / category column with a string: plain loops whose
+ * IEEE semantics already give pandas' answer for NaN (false, true for `ne`).
+ * Returns null when the generic path is needed.
+ */
+function fastCmp(op: string, left: Column, right: Column | null, scalar: unknown): Uint8Array | null {
+  const plainNum = (d: DType) => d === 'float64' || d === 'int64';
+  const n = left.length;
+  if (plainNum(left.dtype) && (right ? plainNum(right.dtype) : typeof scalar === 'number')) {
+    const a = left.data as Float64Array;
+    const b = right ? (right.data as Float64Array) : null;
+    const s = scalar as number;
+    const out = new Uint8Array(n);
+    switch (op) {
+      case 'eq': if (b) for (let i = 0; i < n; i++) out[i] = a[i] === b[i] ? 1 : 0; else for (let i = 0; i < n; i++) out[i] = a[i] === s ? 1 : 0; break;
+      case 'ne': if (b) for (let i = 0; i < n; i++) out[i] = a[i] !== b[i] ? 1 : 0; else for (let i = 0; i < n; i++) out[i] = a[i] !== s ? 1 : 0; break;
+      case 'lt': if (b) for (let i = 0; i < n; i++) out[i] = a[i] < b[i] ? 1 : 0; else for (let i = 0; i < n; i++) out[i] = a[i] < s ? 1 : 0; break;
+      case 'le': if (b) for (let i = 0; i < n; i++) out[i] = a[i] <= b[i] ? 1 : 0; else for (let i = 0; i < n; i++) out[i] = a[i] <= s ? 1 : 0; break;
+      case 'gt': if (b) for (let i = 0; i < n; i++) out[i] = a[i] > b[i] ? 1 : 0; else for (let i = 0; i < n; i++) out[i] = a[i] > s ? 1 : 0; break;
+      case 'ge': if (b) for (let i = 0; i < n; i++) out[i] = a[i] >= b[i] ? 1 : 0; else for (let i = 0; i < n; i++) out[i] = a[i] >= s ? 1 : 0; break;
+      default: return null;
+    }
+    return out;
+  }
+  if ((op === 'eq' || op === 'ne') && !right && typeof scalar === 'string') {
+    const hit = op === 'eq' ? 1 : 0, miss = 1 - hit;
+    const out = new Uint8Array(n);
+    if (left.dtype === 'string') {
+      const d = left.data as readonly unknown[];
+      for (let i = 0; i < n; i++) out[i] = d[i] === scalar ? hit : miss;
+      return out;
+    }
+    if (left.dtype === 'category') {
+      const code = left.meta.categories!.findIndex((c) => valuesEqual(c, scalar));
+      const d = left.data as Int32Array;
+      if (code < 0) out.fill(miss);
+      else for (let i = 0; i < n; i++) out[i] = d[i] === code ? hit : miss;
+      return out;
+    }
+  }
+  return null;
 }
 
 /** Result dtype of a numeric kernel, following pandas' promotion rules. */

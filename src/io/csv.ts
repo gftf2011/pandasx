@@ -202,7 +202,21 @@ export class CsvTokenizer {
     if (this.first && text.length) { if (text.charCodeAt(0) === 0xfeff) i = 1; this.first = false; }
     const n = text.length;
     const sepLen = this.sep.length;
+    const lines = sepLen === 1 && !this.whitespace && this.quote !== '';
     for (; i < n; i++) {
+      // Fast path: a whole line with no quote, escape, CR or leading comment is split directly.
+      if (lines && this.atRowStart && this.field === '' && this.row.length === 0 && !this.inQuotes && !this.inComment && !this.pendingCR && !this.quoteAtChunkEnd && !this.quotedField) {
+        const nl = text.indexOf('\n', i);
+        if (nl >= 0) {
+          const end = nl > i && text.charCodeAt(nl - 1) === 13 ? nl - 1 : nl;
+          const line = text.slice(i, end);
+          if (!line.includes(this.quote) && !line.includes('\r') && !(this.escape && line.includes(this.escape)) && !(this.comment && line.startsWith(this.comment))) {
+            if (line !== '') out.push(line.split(this.sep));
+            i = nl;
+            continue;
+          }
+        }
+      }
       const ch = text[i];
       if (this.pendingCR) { this.pendingCR = false; if (ch === '\n') continue; }
       if (this.quoteAtChunkEnd) {
@@ -330,6 +344,10 @@ const NUMBER_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
 const SPECIAL_NUM: Record<string, number> = { inf: Infinity, '+inf': Infinity, '-inf': -Infinity, Infinity: Infinity, '-Infinity': -Infinity };
 
 export function inferColumn(raw: readonly string[], na: ReadonlySet<string>, trueSet: ReadonlySet<string>, falseSet: ReadonlySet<string>, forced: DType | undefined, thousands?: string, decimal?: string): Column {
+  if (!forced && !thousands && (!decimal || decimal === '.')) {
+    const fast = fastNumeric(raw, na, trueSet, falseSet);
+    if (fast) return fast;
+  }
   const values = raw.map((v) => (na.has(v) ? null : v));
   if (forced === 'string' || forced === 'object') return Column.from(values, forced);
   const clean = (v: string) => {
@@ -366,6 +384,51 @@ export function inferColumn(raw: readonly string[], na: ReadonlySet<string>, tru
     return Column.from(values.map((v) => trueSet.has(v!)), 'bool');
   }
   return Column.from(values, 'string');
+}
+
+/**
+ * One pass over a plain numeric column: parses with Number() straight into a
+ * Float64Array. Returns null, so the caller runs the full inference, at the first
+ * value that is not a plain decimal number (a string, 'inf', '0x1f', a boolean
+ * marker...), when every value is missing, or for integers beyond 2^53.
+ */
+function fastNumeric(raw: readonly string[], na: ReadonlySet<string>, trueSet: ReadonlySet<string>, falseSet: ReadonlySet<string>): Column | null {
+  const n = raw.length;
+  const out = new Float64Array(n);
+  // When no NA / true / false marker is itself a number, numbers skip the set lookups.
+  const isNumber = (v: string) => +v === +v && plainNumber(v);
+  const numericMarker = [na, trueSet, falseSet].some((set) => [...set].some(isNumber));
+  let ints = true, missing = false, any = false, unsafe = false;
+  for (let i = 0; i < n; i++) {
+    const v = raw[i];
+    const num = +v;
+    const isNum = num === num && plainNumber(v);
+    if (!isNum || numericMarker) {
+      if (na.has(v)) { out[i] = NaN; missing = true; continue; }
+      if (!isNum || trueSet.has(v) || falseSet.has(v)) return null;
+    }
+    any = true;
+    out[i] = num;
+    if (ints) {
+      if (v.includes('.') || v.includes('e') || v.includes('E')) ints = false;
+      else if (!Number.isSafeInteger(num)) unsafe = true;
+    }
+  }
+  if (!any || (ints && unsafe)) return null;
+  return new Column(ints && !missing ? 'int64' : 'float64', out);
+}
+
+/** Starts like a decimal number (digit, sign or point) and is not a 0x / 0b / 0o literal or blank. */
+function plainNumber(v: string): boolean {
+  let j = 0;
+  while (j < v.length && v.charCodeAt(j) <= 32) j++;
+  if (j === v.length) return false;
+  let c = v.charCodeAt(j);
+  if (c === 43 || c === 45) c = v.charCodeAt(++j); // + -
+  if (c === 46) return true; // .5
+  if (c < 48 || c > 57) return false;
+  const next = v.charCodeAt(j + 1) | 32;
+  return !(c === 48 && (next === 120 || next === 98 || next === 111)); // 0x 0b 0o
 }
 
 function toNum(v: string): number {
