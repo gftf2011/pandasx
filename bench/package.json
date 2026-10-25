@@ -1,0 +1,18 @@
+{
+  "name": "pandasx-bench",
+  "private": true,
+  "type": "module",
+  "description": "Benchmarks pandasx against Arquero, danfo.js and Data-Forge.",
+  "scripts": {
+    "bench": "node run.mjs"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "arquero": "8.0.3",
+    "danfojs": "1.2.0",
+    "data-forge": "1.10.5",
+    "papaparse": "5.7.0"
+  }
+}

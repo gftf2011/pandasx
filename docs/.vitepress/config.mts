@@ -43,6 +43,7 @@ const guide = [
     text: 'Reference',
     items: [
       { text: 'Differences from pandas', link: '/guide/differences' },
+      { text: 'Benchmarks', link: '/guide/benchmarks' },
       { text: 'API reference', link: '/api/' },
     ],
   },

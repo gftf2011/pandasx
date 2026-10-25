@@ -95,6 +95,21 @@ The binary formats need optional packages, installed only when used: `exceljs` (
 
 The main ones: `[]` and operators become methods, binary I/O is asynchronous, datetimes have millisecond resolution, column labels are unique strings, and plots are SVG with no secondary y axis. The full list is in [Differences from pandas](https://gftf2011.github.io/pandasx/guide/differences).
 
+## Performance
+
+Six common operations on 1 million rows against the other JavaScript dataframe libraries (Apple M2, Node.js 24), median time, lower is better:
+
+| Task | pandasx | Arquero | danfo.js | Data-Forge |
+|---|---:|---:|---:|---:|
+| `groupby` (1,000 groups) | **132 ms** | 202 ms | 701 ms | 3.04 s |
+| `merge` (inner join) | **155 ms** | 219 ms | 1.04 s | 527 ms |
+| `sortValues` | **125 ms** | 721 ms | 168 s | 2.11 s |
+| `filter` | **38 ms** | 41 ms | 512 ms | 112 ms |
+| `valueCounts` | **55 ms** | 125 ms | 116 ms | 357 ms |
+| `readCsv` | 1.17 s | **975 ms** | 2.32 s | 3.29 s |
+
+pandasx is the fastest at 7 of the 10 tasks (filtering, sorting, group by, joins, arithmetic, statistics, `valueCounts`); Arquero is faster at CSV parsing and danfo.js at writing CSV. All ten tasks, both sizes and the method are in [Benchmarks](https://gftf2011.github.io/pandasx/guide/benchmarks); the code is in [`bench/`](bench).
+
 ## Development
 
 ```bash
@@ -110,6 +125,12 @@ PANDAS_PYTHON=/path/to/venv/bin/python npm run parity
 ```
 
 The parity suite compares every case with real pandas; it needs a Python with pandas, scipy, pyarrow, tables, openpyxl and lxml. `parity/fixtures.py` regenerates the files in `test/fixtures`.
+
+```bash
+cd bench && npm ci && npm run bench
+```
+
+The benchmark compares pandasx with Arquero, danfo.js and Data-Forge; see [`bench/README.md`](bench/README.md).
 
 ### Documentation
 
